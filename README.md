@@ -7,6 +7,7 @@ Local MCP server for using several Gmail accounts from Codex in parallel. Each a
 - `gmail_list_accounts`
 - `gmail_get_profile(account)`
 - `gmail_search(account, query, maxResults?)`
+- `gmail_search_many(accounts?, query, maxResultsPerAccount?)`
 - `gmail_read_message(account, messageId)`
 - `gmail_read_thread(account, threadId)`
 - `gmail_list_labels(account)`
@@ -228,6 +229,14 @@ Use gmail_search with account private and query "from:alice@example.com newer_th
 ```
 
 ```text
+Use gmail_search_many with accounts ["private", "work", "support"] and query "invoice newer_than:30d".
+```
+
+```text
+Search all configured Gmail accounts for "from:alice@example.com newer_than:7d" and group results by account.
+```
+
+```text
 Read thread THREAD_ID from account work.
 ```
 
@@ -238,6 +247,8 @@ Archive these message IDs in account support: ...
 ## Notes
 
 - `gmail_apply_labels` accepts label display names or Gmail label IDs.
+- `gmail_search_many` searches all configured accounts when `accounts` is omitted.
+- `gmail_search_many` returns per-account errors without hiding successful results from other accounts.
 - `gmail_archive` only removes the `INBOX` label.
 - `gmail_create_draft` creates a draft only. There is no send tool.
 - Unknown account aliases and missing token files return readable errors.

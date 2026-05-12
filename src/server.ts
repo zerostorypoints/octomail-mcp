@@ -13,6 +13,33 @@ const accountShape = {
   account: z.string().min(1).describe("Configured Gmail account alias, e.g. work, private, support."),
 };
 
+async function searchAccount(account: string, query: string, maxResults: number) {
+  const gmail = await gmailForAccount(account);
+  const list = await gmail.users.messages.list({
+    userId: "me",
+    q: query,
+    maxResults,
+  });
+
+  const messages = await Promise.all(
+    (list.data.messages ?? []).map(async (message) => {
+      const detail = await gmail.users.messages.get({
+        userId: "me",
+        id: message.id ?? "",
+        format: "metadata",
+        metadataHeaders: ["From", "To", "Subject", "Date"],
+      });
+      return summarizeMessage(detail.data);
+    }),
+  );
+
+  return {
+    account,
+    resultSizeEstimate: list.data.resultSizeEstimate,
+    messages,
+  };
+}
+
 async function safeTool(fn: () => Promise<unknown>) {
   try {
     return textResult(await fn());
@@ -50,28 +77,58 @@ server.tool(
   },
   async ({ account, query, maxResults }) =>
     safeTool(async () => {
-      const gmail = await gmailForAccount(account);
-      const list = await gmail.users.messages.list({
-        userId: "me",
-        q: query,
-        maxResults,
-      });
+      const result = await searchAccount(account, query, maxResults);
+      return {
+        resultSizeEstimate: result.resultSizeEstimate,
+        messages: result.messages,
+      };
+    }),
+);
 
-      const messages = await Promise.all(
-        (list.data.messages ?? []).map(async (message) => {
-          const detail = await gmail.users.messages.get({
-            userId: "me",
-            id: message.id ?? "",
-            format: "metadata",
-            metadataHeaders: ["From", "To", "Subject", "Date"],
-          });
-          return summarizeMessage(detail.data);
-        }),
+server.tool(
+  "gmail_search_many",
+  "Search Gmail messages across multiple configured accounts. Results are grouped by account.",
+  {
+    accounts: z
+      .array(z.string().min(1))
+      .min(1)
+      .optional()
+      .describe("Configured account aliases to search. If omitted, all configured accounts are searched."),
+    query: z.string().describe("Gmail search query, e.g. from:alice@example.com newer_than:7d."),
+    maxResultsPerAccount: z.number().int().min(1).max(50).optional().default(10),
+  },
+  async ({ accounts, query, maxResultsPerAccount }) =>
+    safeTool(async () => {
+      const config = loadAccountsConfig();
+      const configuredAccounts = Object.keys(config.accounts).sort();
+      const targetAccounts = accounts?.length ? accounts : configuredAccounts;
+      const unknownAccounts = targetAccounts.filter((account) => !config.accounts[account]);
+
+      if (unknownAccounts.length) {
+        throw new Error(
+          `Unknown Gmail account alias(es): ${unknownAccounts.join(", ")}. Known accounts: ${configuredAccounts.join(", ") || "(none configured)"}.`,
+        );
+      }
+
+      const results = await Promise.allSettled(
+        targetAccounts.map((account) => searchAccount(account, query, maxResultsPerAccount)),
       );
 
       return {
-        resultSizeEstimate: list.data.resultSizeEstimate,
-        messages,
+        query,
+        maxResultsPerAccount,
+        accounts: targetAccounts,
+        results: results.map((result, index) => {
+          const account = targetAccounts[index];
+          if (result.status === "fulfilled") {
+            return result.value;
+          }
+
+          return {
+            account,
+            error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+          };
+        }),
       };
     }),
 );
