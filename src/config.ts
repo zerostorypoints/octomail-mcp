@@ -8,8 +8,20 @@ import dotenv from "dotenv";
 dotenv.config({ quiet: true });
 dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".env"), quiet: true });
 
+export type RawAccountEntry = {
+  tokenPath?: string;
+  label?: string;
+  email?: string;
+};
+
+export type RawAccountsConfig = {
+  accounts: Record<string, RawAccountEntry>;
+};
+
 export type AccountConfig = {
   tokenPath: string;
+  label?: string;
+  email?: string;
 };
 
 export type AccountsConfig = {
@@ -20,6 +32,8 @@ export type OAuthCredentials = {
   clientId: string;
   clientSecret: string;
 };
+
+const ALIAS_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
 export function expandPath(value: string): string {
   if (value === "~") {
@@ -37,39 +51,115 @@ export function accountsConfigPath(): string {
   return expandPath(process.env.GMAIL_MCP_ACCOUNTS_FILE ?? "accounts.json");
 }
 
-export function loadAccountsConfig(): AccountsConfig {
-  const configPath = accountsConfigPath();
-  if (!fs.existsSync(configPath)) {
-    throw new Error(
-      `Accounts config not found at ${configPath}. Copy accounts.example.json to accounts.json or set GMAIL_MCP_ACCOUNTS_FILE.`,
-    );
+export function tokenDir(): string {
+  return expandPath(process.env.GMAIL_MCP_TOKEN_DIR ?? "~/.gmail-multi-mcp/tokens");
+}
+
+export function defaultTokenPath(alias: string): string {
+  return path.join(tokenDir(), `${alias}.json`);
+}
+
+export function assertValidAlias(alias: string): void {
+  if (!ALIAS_PATTERN.test(alias)) {
+    throw new Error(`Invalid account alias "${alias}". Use letters, digits, underscores or hyphens.`);
+  }
+}
+
+function validateRawConfig(parsed: unknown, configPath: string): RawAccountsConfig {
+  const shapeError = `Invalid accounts config at ${configPath}. Expected {"accounts": {...}}.`;
+  if (typeof parsed !== "object" || parsed === null || !("accounts" in parsed)) {
+    throw new Error(shapeError);
   }
 
-  const parsed = JSON.parse(fs.readFileSync(configPath, "utf8")) as unknown;
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    !("accounts" in parsed) ||
-    typeof (parsed as AccountsConfig).accounts !== "object" ||
-    (parsed as AccountsConfig).accounts === null
-  ) {
-    throw new Error(`Invalid accounts config at ${configPath}. Expected {"accounts": {...}}.`);
+  const rawAccounts = (parsed as { accounts: unknown }).accounts;
+  if (typeof rawAccounts !== "object" || rawAccounts === null || Array.isArray(rawAccounts)) {
+    throw new Error(shapeError);
   }
 
-  const accounts: Record<string, AccountConfig> = {};
-  for (const [alias, account] of Object.entries((parsed as AccountsConfig).accounts)) {
-    if (!/^[a-zA-Z0-9_-]+$/.test(alias)) {
-      throw new Error(`Invalid account alias "${alias}". Use letters, digits, underscores or hyphens.`);
+  const accounts: Record<string, RawAccountEntry> = {};
+  for (const [alias, entry] of Object.entries(rawAccounts as Record<string, unknown>)) {
+    assertValidAlias(alias);
+
+    if (entry !== null && (typeof entry !== "object" || Array.isArray(entry))) {
+      throw new Error(`Invalid account config for "${alias}". Expected an object such as {} or {"label": "Work"}.`);
     }
 
-    if (typeof account !== "object" || account === null || typeof account.tokenPath !== "string") {
-      throw new Error(`Invalid account config for "${alias}". Expected a tokenPath string.`);
+    const value = (entry ?? {}) as RawAccountEntry;
+    for (const field of ["tokenPath", "label", "email"] as const) {
+      if (value[field] !== undefined && typeof value[field] !== "string") {
+        throw new Error(`Invalid "${field}" for account "${alias}". Expected a string.`);
+      }
     }
 
-    accounts[alias] = { tokenPath: expandPath(account.tokenPath) };
+    accounts[alias] = value;
   }
 
   return { accounts };
+}
+
+export function loadRawAccountsConfig(): RawAccountsConfig {
+  const configPath = accountsConfigPath();
+  if (!fs.existsSync(configPath)) {
+    throw new Error(
+      `Accounts config not found at ${configPath}. Run: npm run setup — or copy accounts.example.json to accounts.json.`,
+    );
+  }
+
+  return validateRawConfig(JSON.parse(fs.readFileSync(configPath, "utf8")), configPath);
+}
+
+export function saveAccountsConfig(config: RawAccountsConfig): void {
+  const configPath = accountsConfigPath();
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+
+export function resolveAccount(alias: string, entry: RawAccountEntry): AccountConfig {
+  return {
+    tokenPath: entry.tokenPath ? expandPath(entry.tokenPath) : defaultTokenPath(alias),
+    label: entry.label,
+    email: entry.email,
+  };
+}
+
+export function loadAccountsConfig(): AccountsConfig {
+  const raw = loadRawAccountsConfig();
+  const accounts: Record<string, AccountConfig> = {};
+  for (const [alias, entry] of Object.entries(raw.accounts)) {
+    accounts[alias] = resolveAccount(alias, entry);
+  }
+  return { accounts };
+}
+
+export function ensureAccount(alias: string, label?: string): { config: AccountConfig; created: boolean } {
+  assertValidAlias(alias);
+
+  const configPath = accountsConfigPath();
+  const raw: RawAccountsConfig = fs.existsSync(configPath) ? loadRawAccountsConfig() : { accounts: {} };
+  const existing = raw.accounts[alias];
+  const created = existing === undefined;
+  const entry: RawAccountEntry = existing ?? {};
+
+  if (label !== undefined) {
+    entry.label = label;
+  }
+
+  if (created || label !== undefined) {
+    raw.accounts[alias] = entry;
+    saveAccountsConfig(raw);
+  }
+
+  return { config: resolveAccount(alias, entry), created };
+}
+
+export function setAccountEmail(alias: string, email: string): void {
+  const raw = loadRawAccountsConfig();
+  const entry = raw.accounts[alias];
+  if (!entry) {
+    return;
+  }
+  entry.email = email;
+  saveAccountsConfig(raw);
 }
 
 export function getAccountConfig(account: string): AccountConfig {
