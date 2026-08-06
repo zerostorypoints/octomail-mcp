@@ -1550,8 +1550,10 @@ Target roughly 120 lines. Required sections, in order:
 
 - [ ] **Step 8: Verify no personal identifiers leaked into the docs**
 
-Run: `grep -rniE "<user>|work|support" README.md docs/ .env.example accounts.example.json SECURITY.md; echo "exit: $?"`
-Expected: no matches, `exit: 1`. Any match must be fixed before committing. Note that `docs/superpowers/` legitimately contains the spec and this plan — restrict the grep to the paths listed above.
+Run: `grep -rniE "<user>|work|support" README.md docs/*.md .env.example accounts.example.json SECURITY.md; echo "exit: $?"`
+Expected: no matches, `exit: 1`. Any match must be fixed before committing.
+
+The glob `docs/*.md` is deliberate and must not be broadened to `docs/`: the design spec and this implementation plan live under `docs/superpowers/` and legitimately name the real aliases. The constraint binds user-facing documentation, not the planning records.
 
 - [ ] **Step 9: Verify every command named in the docs exists**
 
