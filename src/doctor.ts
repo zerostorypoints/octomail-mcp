@@ -14,11 +14,23 @@ function newestMtime(dir: string): number {
     return 0;
   }
 
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    // Directory vanished or became unreadable mid-scan — contributes nothing.
+    return 0;
+  }
+
   let newest = 0;
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  for (const entry of entries) {
     const full = path.join(dir, entry.name);
-    const mtime = entry.isDirectory() ? newestMtime(full) : fs.statSync(full).mtimeMs;
-    newest = Math.max(newest, mtime);
+    try {
+      const mtime = entry.isDirectory() ? newestMtime(full) : fs.statSync(full).mtimeMs;
+      newest = Math.max(newest, mtime);
+    } catch {
+      // File vanished or became unreadable between readdir and stat — skip it.
+    }
   }
   return newest;
 }
@@ -31,16 +43,23 @@ function checkNode(): { ok: boolean; line: string } {
 }
 
 function checkBuild(): { ok: boolean; line: string } {
-  const distEntry = path.join(projectRoot, "dist", "server.js");
-  if (!fs.existsSync(distEntry)) {
-    return { ok: false, line: "✗ dist/server.js is missing — run: npm run build" };
-  }
+  try {
+    const distEntry = path.join(projectRoot, "dist", "server.js");
+    if (!fs.existsSync(distEntry)) {
+      return { ok: false, line: "✗ dist/server.js is missing — run: npm run build" };
+    }
 
-  if (fs.statSync(distEntry).mtimeMs < newestMtime(path.join(projectRoot, "src"))) {
-    return { ok: false, line: "✗ dist/ is older than src/ — run: npm run build" };
-  }
+    if (fs.statSync(distEntry).mtimeMs < newestMtime(path.join(projectRoot, "src"))) {
+      return { ok: false, line: "✗ dist/ is older than src/ — run: npm run build" };
+    }
 
-  return { ok: true, line: "✓ Build is present and current" };
+    return { ok: true, line: "✓ Build is present and current" };
+  } catch (error) {
+    return {
+      ok: false,
+      line: `✗ Could not check build status: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 function checkCredentials(): { ok: boolean; line: string } {
@@ -77,9 +96,14 @@ async function checkAccounts(): Promise<{ ok: boolean; lines: string[] }> {
       continue;
     }
 
-    const mode = fs.statSync(entry.tokenPath).mode & 0o777;
-    if (mode !== 0o600) {
-      lines.push(`! ${alias.padEnd(12)}— token file mode is ${mode.toString(8)}, expected 600: ${entry.tokenPath}`);
+    try {
+      const mode = fs.statSync(entry.tokenPath).mode & 0o777;
+      if (mode !== 0o600) {
+        lines.push(`! ${alias.padEnd(12)}— token file mode is ${mode.toString(8)}, expected 600: ${entry.tokenPath}`);
+      }
+    } catch {
+      // Token file vanished/rotated between existsSync and statSync — the getProfile
+      // check below is the real signal for this account, so don't fail it here.
     }
 
     try {
