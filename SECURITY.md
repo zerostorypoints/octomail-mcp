@@ -16,7 +16,12 @@ message, which archives it. Nothing is ever permanently removed.
 
 ## Where your credentials live
 
-- OAuth client ID and secret stay in a local `.env` file, written at mode `0600`.
+- OAuth client ID and secret stay in a local `.env` file, written at mode
+  `0600` when `npm run setup` creates it. If you hand-write `.env` instead,
+  run `chmod 600 .env` yourself — your umask likely leaves it at `0644`.
+- The client ID and secret can instead live in a downloaded `credentials.json`
+  (via `GOOGLE_OAUTH_CREDENTIALS_FILE`). Nothing chmods this file for you;
+  run `chmod 600 credentials.json` after downloading it.
 - Per-account OAuth tokens are written outside the repository, by default under
   `~/.gmail-multi-mcp/tokens/`, each at mode `0600`.
 - `.env`, `accounts.json`, and `credentials.json` are all git-ignored. No

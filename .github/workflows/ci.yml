@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -28,3 +31,6 @@ jobs:
       - run: npm run build
 
       - run: npm test
+
+      - name: Check for leaked personal identifiers
+        run: '! grep -rniE "<user>|work|support" README.md docs/*.md .env.example accounts.example.json SECURITY.md src/'
