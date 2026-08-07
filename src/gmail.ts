@@ -165,7 +165,9 @@ export function describeAccountError(account: string, error: unknown): string {
   if (isInvalidGrantError(error)) {
     return [
       `Gmail account "${account}" authorization has expired or was revoked.`,
-      `Run: npm run auth -- --account ${account}`,
+      // The command gets its own line so selecting it does not also drag in
+      // the sentence that follows.
+      `Run:\n  npm run auth -- --account ${account}\n`,
       "If your Google OAuth app is still in Testing mode, refresh tokens expire after 7 days.",
       "See docs/troubleshooting.md.",
     ].join(" ");
