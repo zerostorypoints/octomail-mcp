@@ -1,9 +1,28 @@
 {
-  "name": "gmail-multi-mcp",
+  "name": "@zerostorypoints/gmail-mcp",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Local MCP server for using multiple Gmail accounts side by side.",
+  "license": "Apache-2.0",
+  "author": "Piotr Dziubecki <piotr@zerostorypoints.com>",
+  "homepage": "https://github.com/zerostorypoints/gmail-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zerostorypoints/gmail-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zerostorypoints/gmail-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "gmail",
+    "claude",
+    "claude-code",
+    "codex",
+    "typescript"
+  ],
   "bin": {
     "gmail-multi-mcp": "./dist/server.js"
   },
