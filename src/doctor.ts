@@ -89,19 +89,23 @@ export async function checkAccounts(
   const lines: string[] = [];
   let ok = true;
 
+  // Size the alias column from the actual aliases so a long one does not
+  // collide with the text after it.
+  const width = Math.max(...aliases.map((alias) => alias.length)) + 1;
+
   for (const alias of aliases) {
     const entry = config.accounts[alias];
 
     if (!fs.existsSync(entry.tokenPath)) {
       ok = false;
-      lines.push(`✗ ${alias.padEnd(12)}— not authorized, run: npm run auth -- --account ${alias}`);
+      lines.push(`✗ ${alias.padEnd(width)}— not authorized, run: npm run auth -- --account ${alias}`);
       continue;
     }
 
     try {
       const mode = fs.statSync(entry.tokenPath).mode & 0o777;
       if (mode !== 0o600) {
-        lines.push(`! ${alias.padEnd(12)}— token file mode is ${mode.toString(8)}, expected 600: ${entry.tokenPath}`);
+        lines.push(`! ${alias.padEnd(width)}— token file mode is ${mode.toString(8)}, expected 600: ${entry.tokenPath}`);
       }
     } catch {
       // Token file vanished/rotated between existsSync and statSync — the getProfile
@@ -111,10 +115,10 @@ export async function checkAccounts(
     try {
       const gmail = await getGmailClient(alias);
       const profile = await gmail.users.getProfile({ userId: "me" });
-      lines.push(`✓ ${alias.padEnd(12)}→ ${profile.data.emailAddress ?? "(unknown address)"}`);
+      lines.push(`✓ ${alias.padEnd(width)}→ ${profile.data.emailAddress ?? "(unknown address)"}`);
     } catch (error) {
       ok = false;
-      lines.push(`✗ ${alias.padEnd(12)}— ${describeAccountError(alias, error)}`);
+      lines.push(`✗ ${alias.padEnd(width)}— ${describeAccountError(alias, error)}`);
     }
   }
 
