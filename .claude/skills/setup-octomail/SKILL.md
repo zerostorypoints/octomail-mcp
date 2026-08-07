@@ -1,9 +1,9 @@
 ---
-name: setup-gmail-mcp
-description: Use when setting up or troubleshooting this Gmail MCP server — configuring OAuth credentials, authorizing Gmail accounts, verifying they work, or registering the server with an MCP client.
+name: setup-octomail
+description: Use when setting up or troubleshooting Octomail, this multi-account Gmail MCP server — configuring OAuth credentials, authorizing Gmail accounts, verifying they work, or registering the server with an MCP client.
 ---
 
-# Setting up Gmail MCP
+# Setting up Octomail
 
 This server exposes several Gmail accounts to an MCP client, each addressed by
 an alias. Setting it up means: OAuth credentials once, then one authorization

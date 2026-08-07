@@ -1,10 +1,10 @@
-# Gmail Multi MCP
+# Octomail
 
-A local MCP server that exposes several Gmail accounts side by side to an MCP
-client, each one addressed by an explicit alias you choose (`work`,
-`personal`, `support`, ...). There is no forwarding, no mailbox aggregation,
-and no shared token — every account authorizes and stores its credentials
-independently.
+Octomail is a local, multi-account Gmail MCP server that exposes several
+Gmail accounts side by side to an MCP client, each one addressed by an
+explicit alias you choose (`work`, `personal`, `support`, ...). There is no
+forwarding, no mailbox aggregation, and no shared token — every account
+authorizes and stores its credentials independently.
 
 ## Safety
 

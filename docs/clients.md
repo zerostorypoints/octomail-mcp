@@ -11,13 +11,13 @@ npm run setup -- --print-config
 
 This prints ready-to-paste config blocks for Claude Code, Claude Desktop, and
 Codex, filled in with the correct absolute paths for your checkout. The
-sections below show what those blocks look like, with `/path/to/gmail-mcp` as
-a stand-in for wherever you cloned this repository.
+sections below show what those blocks look like, with `/path/to/octomail-mcp`
+as a stand-in for wherever you cloned this repository.
 
 ## Claude Code
 
 ```bash
-claude mcp add gmail-multi --env GMAIL_MCP_ACCOUNTS_FILE=/path/to/gmail-mcp/accounts.json -- node /path/to/gmail-mcp/dist/server.js
+claude mcp add octomail --env OCTOMAIL_ACCOUNTS_FILE=/path/to/octomail-mcp/accounts.json -- node /path/to/octomail-mcp/dist/server.js
 ```
 
 ## Claude Desktop
@@ -27,11 +27,11 @@ Add an entry under `mcpServers` in `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "gmail-multi": {
+    "octomail": {
       "command": "node",
-      "args": ["/path/to/gmail-mcp/dist/server.js"],
+      "args": ["/path/to/octomail-mcp/dist/server.js"],
       "env": {
-        "GMAIL_MCP_ACCOUNTS_FILE": "/path/to/gmail-mcp/accounts.json"
+        "OCTOMAIL_ACCOUNTS_FILE": "/path/to/octomail-mcp/accounts.json"
       }
     }
   }
@@ -43,10 +43,10 @@ Add an entry under `mcpServers` in `claude_desktop_config.json`:
 Add to `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.gmail_multi]
+[mcp_servers.octomail]
 command = "node"
-args = ["/path/to/gmail-mcp/dist/server.js"]
-env = { GMAIL_MCP_ACCOUNTS_FILE = "/path/to/gmail-mcp/accounts.json" }
+args = ["/path/to/octomail-mcp/dist/server.js"]
+env = { OCTOMAIL_ACCOUNTS_FILE = "/path/to/octomail-mcp/accounts.json" }
 ```
 
 ## After changing client config

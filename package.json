@@ -1,18 +1,18 @@
 {
-  "name": "@zerostorypoints/gmail-mcp",
+  "name": "@zerostorypoints/octomail-mcp",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local MCP server for using multiple Gmail accounts side by side.",
+  "description": "Octomail: a local multi-account Gmail MCP server for using multiple Gmail accounts side by side.",
   "license": "Apache-2.0",
   "author": "Piotr Dziubecki <piotr@zerostorypoints.com>",
-  "homepage": "https://github.com/zerostorypoints/gmail-mcp#readme",
+  "homepage": "https://github.com/zerostorypoints/octomail-mcp#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zerostorypoints/gmail-mcp.git"
+    "url": "git+https://github.com/zerostorypoints/octomail-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/zerostorypoints/gmail-mcp/issues"
+    "url": "https://github.com/zerostorypoints/octomail-mcp/issues"
   },
   "keywords": [
     "mcp",
@@ -24,7 +24,7 @@
     "typescript"
   ],
   "bin": {
-    "gmail-multi-mcp": "./dist/server.js"
+    "octomail": "./dist/server.js"
   },
   "scripts": {
     "auth": "tsx src/auth.ts",

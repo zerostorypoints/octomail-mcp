@@ -42,15 +42,15 @@ Every field on an account entry is optional:
 
 | Field | Meaning |
 | --- | --- |
-| `tokenPath` | Where the OAuth token is stored. Defaults to `~/.gmail-multi-mcp/tokens/<alias>.json`. |
+| `tokenPath` | Where the OAuth token is stored. Defaults to `~/.octomail/tokens/<alias>.json`. |
 | `label` | Free text you write, for your own reference. Not used by the server logic. |
 | `email` | The account's real Gmail address, refreshed automatically after every successful authorization. Don't hand-edit this — let `npm run auth` fill it in. |
 
 ## Where tokens live
 
 By default, each account's OAuth token is written to
-`~/.gmail-multi-mcp/tokens/<alias>.json` at file mode `0600` (readable and
-writable only by you). Set `GMAIL_MCP_TOKEN_DIR` to use a different directory
+`~/.octomail/tokens/<alias>.json` at file mode `0600` (readable and
+writable only by you). Set `OCTOMAIL_TOKEN_DIR` to use a different directory
 for all accounts.
 
 Each alias needs its own token file. Never point two aliases at the same

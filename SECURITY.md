@@ -23,7 +23,7 @@ message, which archives it. Nothing is ever permanently removed.
   (via `GOOGLE_OAUTH_CREDENTIALS_FILE`). Nothing chmods this file for you;
   run `chmod 600 credentials.json` after downloading it.
 - Per-account OAuth tokens are written outside the repository, by default under
-  `~/.gmail-multi-mcp/tokens/`, each at mode `0600`.
+  `~/.octomail/tokens/`, each at mode `0600`.
 - `.env`, `accounts.json`, and `credentials.json` are all git-ignored. No
   credential has ever been committed to this repository.
 - The server speaks stdio to a local MCP client. It opens no network listener,

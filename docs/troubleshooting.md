@@ -71,7 +71,7 @@ a `✗ dist/ is older than src/` line.
 cp accounts.example.json accounts.json
 ```
 
-or set `GMAIL_MCP_ACCOUNTS_FILE` to point at wherever your config actually
+or set `OCTOMAIL_ACCOUNTS_FILE` to point at wherever your config actually
 lives.
 
 ## The setup wizard exits saying there is no interactive terminal
