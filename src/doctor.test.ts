@@ -9,21 +9,21 @@ import type { gmailForAccount } from "./gmail.js";
 let workDir: string;
 
 function setup(): void {
-  workDir = fs.mkdtempSync(path.join(os.tmpdir(), "gmail-mcp-doctor-test-"));
-  process.env.GMAIL_MCP_ACCOUNTS_FILE = path.join(workDir, "accounts.json");
-  process.env.GMAIL_MCP_TOKEN_DIR = path.join(workDir, "tokens");
+  workDir = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-doctor-test-"));
+  process.env.OCTOMAIL_ACCOUNTS_FILE = path.join(workDir, "accounts.json");
+  process.env.OCTOMAIL_TOKEN_DIR = path.join(workDir, "tokens");
 }
 
 function teardown(): void {
-  delete process.env.GMAIL_MCP_ACCOUNTS_FILE;
-  delete process.env.GMAIL_MCP_TOKEN_DIR;
+  delete process.env.OCTOMAIL_ACCOUNTS_FILE;
+  delete process.env.OCTOMAIL_TOKEN_DIR;
   fs.rmSync(workDir, { recursive: true, force: true });
 }
 
 test("checkAccounts reports an unauthorized account and fails overall", async () => {
   setup();
   try {
-    fs.writeFileSync(process.env.GMAIL_MCP_ACCOUNTS_FILE as string, JSON.stringify({ accounts: { work: {} } }));
+    fs.writeFileSync(process.env.OCTOMAIL_ACCOUNTS_FILE as string, JSON.stringify({ accounts: { work: {} } }));
 
     const result = await checkAccounts();
 
@@ -39,7 +39,7 @@ test("checkAccounts reports an unauthorized account and fails overall", async ()
 test("checkAccounts warns on a loose token file mode without failing overall", async () => {
   setup();
   try {
-    fs.writeFileSync(process.env.GMAIL_MCP_ACCOUNTS_FILE as string, JSON.stringify({ accounts: { work: {} } }));
+    fs.writeFileSync(process.env.OCTOMAIL_ACCOUNTS_FILE as string, JSON.stringify({ accounts: { work: {} } }));
 
     const tokenPath = path.join(workDir, "tokens", "work.json");
     fs.mkdirSync(path.dirname(tokenPath), { recursive: true });

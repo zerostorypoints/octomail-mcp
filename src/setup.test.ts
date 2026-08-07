@@ -40,10 +40,10 @@ test("parseSetupArgs does not swallow the next flag as an account value", () => 
 });
 
 test("printClientConfig quotes a project path containing a space", () => {
-  const root = "/tmp/My Projects/gmail-mcp";
-  const accountsFile = "/tmp/My Projects/gmail-mcp/accounts.json";
-  const originalAccountsFile = process.env.GMAIL_MCP_ACCOUNTS_FILE;
-  process.env.GMAIL_MCP_ACCOUNTS_FILE = accountsFile;
+  const root = "/tmp/My Projects/octomail-mcp";
+  const accountsFile = "/tmp/My Projects/octomail-mcp/accounts.json";
+  const originalAccountsFile = process.env.OCTOMAIL_ACCOUNTS_FILE;
+  process.env.OCTOMAIL_ACCOUNTS_FILE = accountsFile;
 
   const printed: string[] = [];
   const originalLog = console.log;
@@ -56,9 +56,9 @@ test("printClientConfig quotes a project path containing a space", () => {
   } finally {
     console.log = originalLog;
     if (originalAccountsFile === undefined) {
-      delete process.env.GMAIL_MCP_ACCOUNTS_FILE;
+      delete process.env.OCTOMAIL_ACCOUNTS_FILE;
     } else {
-      process.env.GMAIL_MCP_ACCOUNTS_FILE = originalAccountsFile;
+      process.env.OCTOMAIL_ACCOUNTS_FILE = originalAccountsFile;
     }
   }
 
@@ -69,18 +69,18 @@ test("printClientConfig quotes a project path containing a space", () => {
   assert.match(
     output,
     new RegExp(
-      `claude mcp add gmail-multi --env GMAIL_MCP_ACCOUNTS_FILE="${accountsFile.replace(/[/.]/g, "\\$&")}" -- node "${serverPath.replace(/[/.]/g, "\\$&")}"`,
+      `claude mcp add octomail --env OCTOMAIL_ACCOUNTS_FILE="${accountsFile.replace(/[/.]/g, "\\$&")}" -- node "${serverPath.replace(/[/.]/g, "\\$&")}"`,
     ),
   );
 
   // Claude Desktop block: JSON.stringify already quotes correctly.
-  assert.match(output, /"args":\s*\[\s*"\/tmp\/My Projects\/gmail-mcp\/dist\/server\.js"\s*\]/);
+  assert.match(output, /"args":\s*\[\s*"\/tmp\/My Projects\/octomail-mcp\/dist\/server\.js"\s*\]/);
   assert.match(
     output,
-    /"env":\s*\{\s*"GMAIL_MCP_ACCOUNTS_FILE":\s*"\/tmp\/My Projects\/gmail-mcp\/accounts\.json"\s*\}/,
+    /"env":\s*\{\s*"OCTOMAIL_ACCOUNTS_FILE":\s*"\/tmp\/My Projects\/octomail-mcp\/accounts\.json"\s*\}/,
   );
 
   // Codex TOML block: values go through JSON.stringify, which is valid TOML basic-string escaping.
-  assert.match(output, /args = \["\/tmp\/My Projects\/gmail-mcp\/dist\/server\.js"\]/);
-  assert.match(output, /env = \{ GMAIL_MCP_ACCOUNTS_FILE = "\/tmp\/My Projects\/gmail-mcp\/accounts\.json" \}/);
+  assert.match(output, /args = \["\/tmp\/My Projects\/octomail-mcp\/dist\/server\.js"\]/);
+  assert.match(output, /env = \{ OCTOMAIL_ACCOUNTS_FILE = "\/tmp\/My Projects\/octomail-mcp\/accounts\.json" \}/);
 });

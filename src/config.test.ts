@@ -17,14 +17,14 @@ import {
 let workDir: string;
 
 beforeEach(() => {
-  workDir = fs.mkdtempSync(path.join(os.tmpdir(), "gmail-mcp-test-"));
-  process.env.GMAIL_MCP_ACCOUNTS_FILE = path.join(workDir, "accounts.json");
-  process.env.GMAIL_MCP_TOKEN_DIR = path.join(workDir, "tokens");
+  workDir = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-test-"));
+  process.env.OCTOMAIL_ACCOUNTS_FILE = path.join(workDir, "accounts.json");
+  process.env.OCTOMAIL_TOKEN_DIR = path.join(workDir, "tokens");
 });
 
 afterEach(() => {
-  delete process.env.GMAIL_MCP_ACCOUNTS_FILE;
-  delete process.env.GMAIL_MCP_TOKEN_DIR;
+  delete process.env.OCTOMAIL_ACCOUNTS_FILE;
+  delete process.env.OCTOMAIL_TOKEN_DIR;
   fs.rmSync(workDir, { recursive: true, force: true });
 });
 
@@ -44,7 +44,7 @@ test("expandPath leaves an absolute path absolute", () => {
   assert.equal(expandPath("/etc/hosts"), "/etc/hosts");
 });
 
-test("defaultTokenPath honours GMAIL_MCP_TOKEN_DIR", () => {
+test("defaultTokenPath honours OCTOMAIL_TOKEN_DIR", () => {
   assert.equal(defaultTokenPath("work"), path.join(workDir, "tokens", "work.json"));
 });
 

@@ -6,7 +6,7 @@ import { loadAccountsConfig } from "./config.js";
 import { describeAccountError, encodeMimeMessage, gmailForAccount, messageHeader, resolveLabelNames, summarizeMessage, textResult } from "./gmail.js";
 
 const server = new McpServer({
-  name: "gmail-multi-mcp",
+  name: "octomail",
   version: "0.1.0",
 });
 

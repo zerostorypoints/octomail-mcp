@@ -11,7 +11,7 @@ import dotenv from "dotenv";
 // `override: false` means whichever .env loads first wins a given key. A
 // cwd .env belonging to an unrelated project — unremarkable in any project
 // doing Google auth — would otherwise silently shadow GOOGLE_CLIENT_ID,
-// GOOGLE_CLIENT_SECRET, GMAIL_MCP_ACCOUNTS_FILE, or GMAIL_MCP_TOKEN_DIR and
+// GOOGLE_CLIENT_SECRET, OCTOMAIL_ACCOUNTS_FILE, or OCTOMAIL_TOKEN_DIR and
 // point this server at the wrong credentials or the wrong accounts file.
 // Do not add a second `dotenv.config()` call for the cwd: there is no
 // documented use case for it, and every real override path (per-client env
@@ -59,11 +59,14 @@ export function expandPath(value: string): string {
 }
 
 export function accountsConfigPath(): string {
-  return expandPath(process.env.GMAIL_MCP_ACCOUNTS_FILE ?? "accounts.json");
+  return expandPath(process.env.OCTOMAIL_ACCOUNTS_FILE ?? "accounts.json");
 }
 
 export function tokenDir(): string {
-  return expandPath(process.env.GMAIL_MCP_TOKEN_DIR ?? "~/.gmail-multi-mcp/tokens");
+  // Was ~/.gmail-multi-mcp/tokens before the project was renamed to Octomail.
+  // Existing users' tokens live at the old path; OCTOMAIL_TOKEN_DIR (or a
+  // one-time move of the directory) is how they migrate.
+  return expandPath(process.env.OCTOMAIL_TOKEN_DIR ?? "~/.octomail/tokens");
 }
 
 export function defaultTokenPath(alias: string): string {

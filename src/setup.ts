@@ -48,13 +48,13 @@ export function printClientConfig(root: string = projectRoot): void {
 
   console.log("\nClaude Code — run this once:\n");
   console.log(
-    `  claude mcp add gmail-multi --env GMAIL_MCP_ACCOUNTS_FILE="${accountsPath}" -- node "${serverPath}"`,
+    `  claude mcp add octomail --env OCTOMAIL_ACCOUNTS_FILE="${accountsPath}" -- node "${serverPath}"`,
   );
 
   console.log("\nClaude Desktop — add to claude_desktop_config.json under \"mcpServers\":\n");
   console.log(
     JSON.stringify(
-      { "gmail-multi": { command: "node", args: [serverPath], env: { GMAIL_MCP_ACCOUNTS_FILE: accountsPath } } },
+      { octomail: { command: "node", args: [serverPath], env: { OCTOMAIL_ACCOUNTS_FILE: accountsPath } } },
       null,
       2,
     )
@@ -64,10 +64,10 @@ export function printClientConfig(root: string = projectRoot): void {
   );
 
   console.log("\nCodex — add to ~/.codex/config.toml:\n");
-  console.log(`  [mcp_servers.gmail_multi]`);
+  console.log(`  [mcp_servers.octomail]`);
   console.log(`  command = "node"`);
   console.log(`  args = [${JSON.stringify(serverPath)}]`);
-  console.log(`  env = { GMAIL_MCP_ACCOUNTS_FILE = ${JSON.stringify(accountsPath)} }`);
+  console.log(`  env = { OCTOMAIL_ACCOUNTS_FILE = ${JSON.stringify(accountsPath)} }`);
   console.log("\nRestart the client afterwards so it rediscovers the server.");
 }
 
