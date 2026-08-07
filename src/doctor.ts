@@ -71,7 +71,9 @@ function checkCredentials(): { ok: boolean; line: string } {
   }
 }
 
-async function checkAccounts(): Promise<{ ok: boolean; lines: string[] }> {
+export async function checkAccounts(
+  getGmailClient: typeof gmailForAccount = gmailForAccount,
+): Promise<{ ok: boolean; lines: string[] }> {
   let config: AccountsConfig;
   try {
     config = loadAccountsConfig();
@@ -107,7 +109,7 @@ async function checkAccounts(): Promise<{ ok: boolean; lines: string[] }> {
     }
 
     try {
-      const gmail = await gmailForAccount(alias);
+      const gmail = await getGmailClient(alias);
       const profile = await gmail.users.getProfile({ userId: "me" });
       lines.push(`✓ ${alias.padEnd(12)}→ ${profile.data.emailAddress ?? "(unknown address)"}`);
     } catch (error) {
@@ -119,9 +121,11 @@ async function checkAccounts(): Promise<{ ok: boolean; lines: string[] }> {
   return { ok, lines };
 }
 
-export async function runDoctor(): Promise<DoctorReport> {
+export async function runDoctor(
+  getGmailClient: typeof gmailForAccount = gmailForAccount,
+): Promise<DoctorReport> {
   const environment = [checkNode(), checkBuild(), checkCredentials()];
-  const accounts = await checkAccounts();
+  const accounts = await checkAccounts(getGmailClient);
 
   return {
     ok: environment.every((check) => check.ok) && accounts.ok,
