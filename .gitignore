@@ -8,3 +8,7 @@ credentials.json
 *.log
 .DS_Store
 .claude/settings.local.json
+
+# Design specs and implementation plans are local process records, not
+# shipped documentation. They reference real account aliases and local paths.
+docs/superpowers/
