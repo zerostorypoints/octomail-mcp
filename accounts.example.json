@@ -1,13 +1,7 @@
 {
   "accounts": {
-    "work": {
-      "tokenPath": "~/.gmail-multi-mcp/tokens/work.json"
-    },
-    "private": {
-      "tokenPath": "~/.gmail-multi-mcp/tokens/private.json"
-    },
-    "support": {
-      "tokenPath": "~/.gmail-multi-mcp/tokens/support.json"
-    }
+    "personal": { "label": "Personal Gmail" },
+    "work": { "label": "Work (Google Workspace)" },
+    "support": {}
   }
 }

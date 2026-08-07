@@ -1,0 +1,102 @@
+# Google Cloud setup
+
+This server talks to Gmail through your own Google Cloud project. You create the
+project once, then every account you add authorizes against it. Nothing here is
+Gmail-account-specific until the "Test users" step below.
+
+## 1. Create a project and enable the Gmail API
+
+Open the [Google Cloud Console](https://console.cloud.google.com/) and create a
+new project (or pick an existing one you're comfortable using). Then go to
+**APIs & Services > Library**, search for "Gmail API", and enable it.
+
+## 2. Configure the OAuth consent screen
+
+Go to **APIs & Services > OAuth consent screen** and fill in an app name, a
+support email, and a developer contact email.
+
+For **user type**, choose **External** if you plan to authorize a mix of
+personal Gmail addresses and Google Workspace addresses, which is the common
+case. **Internal** only works if every account you'll ever add belongs to the
+same Workspace organization as the project itself — pick it only if that's
+true and stays true.
+
+## 3. Publishing status: use "In Production"
+
+This is the step people skip and regret.
+
+A Google OAuth app with user type **External** that is still in **Testing**
+publishing status issues refresh tokens that **expire after 7 days**. With
+several Gmail accounts wired into this server, that means re-running
+`npm run auth` for every single account, every week, forever. It's easy to
+miss until an account quietly stops working and every tool call against it
+fails with an expired-authorization error.
+
+Moving the app to **In Production** removes that limit — refresh tokens no
+longer expire on a fixed schedule. The trade-off is small for personal use: an
+unverified production app shows Google's "Google hasn't verified this app"
+warning screen during authorization, which you click through via **Advanced >
+Go to (your app name)**. Unverified production apps are also capped at 100
+users total, which does not matter for a personal or small-team Gmail
+integration.
+
+To switch: on the OAuth consent screen page, click **Publish App**, and
+confirm you want production status. You do not need to submit for
+verification.
+
+Reference:
+https://developers.google.com/identity/protocols/oauth2/production-readiness/overview
+
+## 4. Test users (only if you stay in Testing)
+
+If you choose to stay in Testing status anyway, add every Gmail address you
+intend to authorize under **Audience > Test users**, exactly as it appears in
+Gmail (matching case doesn't matter, but typos do). An address missing from
+this list fails authorization with `403 access_denied`; see
+[docs/troubleshooting.md](troubleshooting.md).
+
+## 5. Create the OAuth client
+
+Go to **APIs & Services > Credentials**, click **Create Credentials > OAuth
+client ID**, and choose application type **Desktop app**.
+
+The Desktop app type matters: this project's auth flow opens a temporary local
+web server and redirects Google back to
+`http://127.0.0.1:<port>/oauth2callback`, a loopback address. Only the Desktop
+app client type permits that loopback redirect; Web application clients
+require pre-registered redirect URIs and will reject it.
+
+## 6. Give the credentials to the project
+
+You have three options, in order of convenience:
+
+- Run `npm run setup` and paste the client ID and secret when prompted.
+- Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`.
+- Download the OAuth client's JSON file and point `GOOGLE_OAUTH_CREDENTIALS_FILE`
+  at it.
+
+## 7. Scopes requested
+
+| Scope | Why |
+| --- | --- |
+| `gmail.readonly` | Search, read messages and threads, list labels |
+| `gmail.modify` | Apply and remove labels, archive messages |
+| `gmail.compose` | Create drafts |
+
+There is deliberately no scope, and no tool, for sending mail or for trashing
+or deleting anything.
+
+## 8. Personal Gmail vs Google Workspace
+
+This project treats a personal `@gmail.com` address and a Google Workspace
+address identically: same config format, same commands, same local token
+storage. There is no separate code path.
+
+The only two differences live outside this project entirely:
+
+- **Consent screen user type**, covered in step 2 above.
+- **Workspace admin restrictions.** A Workspace admin can block third-party
+  OAuth apps for their domain regardless of test-user settings. If
+  authorization fails for a Workspace address even though it's on the test-user
+  list, the admin needs to allow this OAuth app, or approve the Gmail scopes it
+  requests.
