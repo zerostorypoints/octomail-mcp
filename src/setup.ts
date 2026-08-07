@@ -4,6 +4,7 @@ import process from "node:process";
 import * as readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { accountsConfigPath, loadOAuthCredentials } from "./config.js";
+import { readFlagValue } from "./cli-args.js";
 import { runDoctor } from "./doctor.js";
 import { authorizeAccount } from "./oauth.js";
 
@@ -17,19 +18,9 @@ export type SetupArgs = {
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 export function parseSetupArgs(argv: string[]): SetupArgs {
-  const readValue = (key: string): string | undefined => {
-    const flagIndex = argv.indexOf(`--${key}`);
-    if (flagIndex >= 0 && argv[flagIndex + 1] && !argv[flagIndex + 1].startsWith("--")) {
-      return argv[flagIndex + 1];
-    }
-
-    const inline = argv.find((arg) => arg.startsWith(`--${key}=`));
-    return inline ? inline.slice(`--${key}=`.length) : undefined;
-  };
-
   return {
-    account: readValue("account"),
-    label: readValue("label"),
+    account: readFlagValue(argv, "account"),
+    label: readFlagValue(argv, "label"),
     skipVerify: argv.includes("--skip-verify"),
     printConfigOnly: argv.includes("--print-config"),
   };
@@ -51,12 +42,14 @@ No OAuth client credentials found. Set one up first:
 Full walkthrough: docs/google-cloud-setup.md
 `;
 
-function printClientConfig(): void {
-  const serverPath = path.join(projectRoot, "dist", "server.js");
+export function printClientConfig(root: string = projectRoot): void {
+  const serverPath = path.join(root, "dist", "server.js");
   const accountsPath = accountsConfigPath();
 
   console.log("\nClaude Code — run this once:\n");
-  console.log(`  claude mcp add gmail-multi --env GMAIL_MCP_ACCOUNTS_FILE=${accountsPath} -- node ${serverPath}`);
+  console.log(
+    `  claude mcp add gmail-multi --env GMAIL_MCP_ACCOUNTS_FILE="${accountsPath}" -- node "${serverPath}"`,
+  );
 
   console.log("\nClaude Desktop — add to claude_desktop_config.json under \"mcpServers\":\n");
   console.log(
@@ -73,8 +66,8 @@ function printClientConfig(): void {
   console.log("\nCodex — add to ~/.codex/config.toml:\n");
   console.log(`  [mcp_servers.gmail_multi]`);
   console.log(`  command = "node"`);
-  console.log(`  args = ["${serverPath}"]`);
-  console.log(`  env = { GMAIL_MCP_ACCOUNTS_FILE = "${accountsPath}" }`);
+  console.log(`  args = [${JSON.stringify(serverPath)}]`);
+  console.log(`  env = { GMAIL_MCP_ACCOUNTS_FILE = ${JSON.stringify(accountsPath)} }`);
   console.log("\nRestart the client afterwards so it rediscovers the server.");
 }
 
@@ -102,11 +95,17 @@ async function ensureCredentials(rl: readline.Interface | undefined): Promise<vo
   }
 
   const envPath = path.join(projectRoot, ".env");
-  const existing = fs.existsSync(envPath) ? `${fs.readFileSync(envPath, "utf8").trimEnd()}\n` : "";
+  const envExists = fs.existsSync(envPath);
+  const existing = envExists ? `${fs.readFileSync(envPath, "utf8").trimEnd()}\n` : "";
+  // Close the window where a pre-existing 0644 .env briefly holds the new
+  // secret before being tightened: chmod first (writeFileSync's `mode` is
+  // ignored for a file that already exists), then write.
+  if (envExists) {
+    fs.chmodSync(envPath, 0o600);
+  }
   fs.writeFileSync(envPath, `${existing}GOOGLE_CLIENT_ID=${clientId}\nGOOGLE_CLIENT_SECRET=${clientSecret}\n`, {
     mode: 0o600,
   });
-  fs.chmodSync(envPath, 0o600);
 
   process.env.GOOGLE_CLIENT_ID = clientId;
   process.env.GOOGLE_CLIENT_SECRET = clientSecret;
@@ -160,6 +159,9 @@ async function main(): Promise<void> {
       console.log("\nVerifying...\n");
       const report = await runDoctor();
       console.log(report.lines.join("\n"));
+      if (!report.ok) {
+        process.exitCode = 1;
+      }
     }
 
     printClientConfig();
