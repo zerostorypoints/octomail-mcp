@@ -25,13 +25,25 @@ without a terminal. Always drive it with flags instead.
    Read the output before doing anything. It reports Node version, whether the
    build is current, whether OAuth credentials resolve, and for each configured
    account either `✓ alias → address` or a `✗` line containing the exact command
-   that fixes it. If everything is `✓`, there is nothing to do.
+   that fixes it. A `!` line may also appear alongside either one, warning that a
+   token file's permissions are wrong. If everything is `✓`, there is nothing to do.
 
 2. **If OAuth credentials are missing**, do not try to create them yourself.
    Tell the user to follow `docs/google-cloud-setup.md`, and stress the
    publishing-status point: a Testing-status app expires refresh tokens after
-   7 days. Ask them to paste the client ID and secret, then write them to `.env`
-   at mode `0600`.
+   7 days.
+
+   Do not ask the user to paste the client secret into the chat, and do not
+   write it yourself. Direct them to put it in `.env` themselves:
+
+   ```bash
+   npm run setup
+   ```
+
+   Run from their own terminal, that prompts for the client ID and secret and
+   writes `.env` at mode `0600` without the value ever passing through you.
+   Alternatively they can create `.env` by hand from `.env.example`. Once they
+   confirm it exists, continue at step 3.
 
 3. **Authorize each account the user names.** One command per account:
 
@@ -44,6 +56,10 @@ without a terminal. Always drive it with flags instead.
    `accounts.json` automatically — never hand-edit that file to add an account.
    Run this in the background or with a generous timeout, since it waits on a
    human.
+
+   **Never attempt the consent screen yourself**, including with browser
+   automation. It requires the user's own signed-in Google session, and
+   completing an OAuth grant is the user's decision to make, not yours.
 
 4. **Verify.**
 
