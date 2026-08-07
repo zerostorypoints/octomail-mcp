@@ -20,7 +20,7 @@ approve access, and the token is saved locally. If `work` isn't already in
 `accounts.json`, the command creates it for you and prints:
 
 ```
-Added new account alias "work" to accounts.json
+Added new account alias "work" to accounts.json.
 ```
 
 No hand-editing of `accounts.json` is required to add an account — `--label`
@@ -44,7 +44,7 @@ Every field on an account entry is optional:
 | --- | --- |
 | `tokenPath` | Where the OAuth token is stored. Defaults to `~/.gmail-multi-mcp/tokens/<alias>.json`. |
 | `label` | Free text you write, for your own reference. Not used by the server logic. |
-| `email` | The account's real Gmail address, written automatically after the first successful authorization. Don't hand-edit this — let `npm run auth` fill it in. |
+| `email` | The account's real Gmail address, refreshed automatically after every successful authorization. Don't hand-edit this — let `npm run auth` fill it in. |
 
 ## Where tokens live
 
