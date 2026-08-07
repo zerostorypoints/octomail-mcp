@@ -1,8 +1,9 @@
+import fs from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadAccountsConfig } from "./config.js";
-import { encodeMimeMessage, gmailForAccount, messageHeader, resolveLabelNames, summarizeMessage, textResult } from "./gmail.js";
+import { describeAccountError, encodeMimeMessage, gmailForAccount, messageHeader, resolveLabelNames, summarizeMessage, textResult } from "./gmail.js";
 
 const server = new McpServer({
   name: "gmail-multi-mcp",
@@ -10,7 +11,7 @@ const server = new McpServer({
 });
 
 const accountShape = {
-  account: z.string().min(1).describe("Configured Gmail account alias, e.g. work, private, support."),
+  account: z.string().min(1).describe("Configured Gmail account alias, e.g. work, personal, support."),
 };
 
 async function searchAccount(account: string, query: string, maxResults: number) {
@@ -40,23 +41,37 @@ async function searchAccount(account: string, query: string, maxResults: number)
   };
 }
 
-async function safeTool(fn: () => Promise<unknown>) {
+async function safeTool(fn: () => Promise<unknown>, account?: string) {
   try {
     return textResult(await fn());
   } catch (error) {
     return textResult({
-      error: error instanceof Error ? error.message : String(error),
+      error: account ? describeAccountError(account, error) : error instanceof Error ? error.message : String(error),
     });
   }
 }
 
-server.tool("gmail_list_accounts", "List configured Gmail account aliases.", {}, async () =>
-  safeTool(async () => {
-    const config = loadAccountsConfig();
-    return {
-      accounts: Object.keys(config.accounts).sort(),
-    };
-  }),
+server.tool(
+  "gmail_list_accounts",
+  "List configured Gmail account aliases, with their email address and whether they are authorized.",
+  {},
+  async () =>
+    safeTool(async () => {
+      const config = loadAccountsConfig();
+      return {
+        accounts: Object.keys(config.accounts)
+          .sort()
+          .map((account) => {
+            const entry = config.accounts[account];
+            return {
+              account,
+              ...(entry.email ? { email: entry.email } : {}),
+              ...(entry.label ? { label: entry.label } : {}),
+              authorized: fs.existsSync(entry.tokenPath),
+            };
+          }),
+      };
+    }),
 );
 
 server.tool("gmail_get_profile", "Get Gmail profile for an account.", accountShape, async ({ account }) =>
@@ -64,7 +79,7 @@ server.tool("gmail_get_profile", "Get Gmail profile for an account.", accountSha
     const gmail = await gmailForAccount(account);
     const response = await gmail.users.getProfile({ userId: "me" });
     return response.data;
-  }),
+  }, account),
 );
 
 server.tool(
@@ -82,7 +97,7 @@ server.tool(
         resultSizeEstimate: result.resultSizeEstimate,
         messages: result.messages,
       };
-    }),
+    }, account),
 );
 
 server.tool(
@@ -126,7 +141,7 @@ server.tool(
 
           return {
             account,
-            error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+            error: describeAccountError(account, result.reason),
           };
         }),
       };
@@ -149,7 +164,7 @@ server.tool(
         format: "full",
       });
       return summarizeMessage(response.data);
-    }),
+    }, account),
 );
 
 server.tool(
@@ -172,7 +187,7 @@ server.tool(
         historyId: response.data.historyId,
         messages: (response.data.messages ?? []).map(summarizeMessage),
       };
-    }),
+    }, account),
 );
 
 server.tool("gmail_list_labels", "List Gmail labels for an account.", accountShape, async ({ account }) =>
@@ -180,7 +195,7 @@ server.tool("gmail_list_labels", "List Gmail labels for an account.", accountSha
     const gmail = await gmailForAccount(account);
     const response = await gmail.users.labels.list({ userId: "me" });
     return response.data.labels ?? [];
-  }),
+  }, account),
 );
 
 server.tool(
@@ -214,7 +229,7 @@ server.tool(
       return {
         modified: results.map((result) => result.data.id),
       };
-    }),
+    }, account),
 );
 
 server.tool(
@@ -242,7 +257,7 @@ server.tool(
       return {
         archived: results.map((result) => result.data.id),
       };
-    }),
+    }, account),
 );
 
 server.tool(
@@ -288,7 +303,7 @@ server.tool(
       });
 
       return draft.data;
-    }),
+    }, account),
 );
 
 const transport = new StdioServerTransport();

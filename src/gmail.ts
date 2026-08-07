@@ -143,3 +143,33 @@ export function encodeMimeMessage(input: {
   const message = `${headers.join("\r\n")}\r\n\r\n${input.body}`;
   return Buffer.from(message).toString("base64url");
 }
+
+export function isInvalidGrantError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as {
+    message?: unknown;
+    response?: { data?: { error?: unknown } };
+  };
+
+  if (candidate.response?.data?.error === "invalid_grant") {
+    return true;
+  }
+
+  return typeof candidate.message === "string" && candidate.message.includes("invalid_grant");
+}
+
+export function describeAccountError(account: string, error: unknown): string {
+  if (isInvalidGrantError(error)) {
+    return [
+      `Gmail account "${account}" authorization has expired or was revoked.`,
+      `Run: npm run auth -- --account ${account}`,
+      "If your Google OAuth app is still in Testing mode, refresh tokens expire after 7 days.",
+      "See docs/troubleshooting.md.",
+    ].join(" ");
+  }
+
+  return error instanceof Error ? error.message : String(error);
+}
