@@ -127,3 +127,11 @@ test("setAccountEmail writes the email back to the config", () => {
   setAccountEmail("work", "alice@example.com");
   assert.equal(loadRawAccountsConfig().accounts.work.email, "alice@example.com");
 });
+
+test("ensureAccount does not rewrite a tilde tokenPath into an absolute path when adding a label", () => {
+  writeConfig({ accounts: { work: { tokenPath: "~/x.json" } } });
+  ensureAccount("work", "New Label");
+  const onDisk = JSON.parse(fs.readFileSync(path.join(workDir, "accounts.json"), "utf8"));
+  assert.equal(onDisk.accounts.work.tokenPath, "~/x.json");
+  assert.equal(onDisk.accounts.work.label, "New Label");
+});

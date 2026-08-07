@@ -15,7 +15,7 @@ export type AuthorizeResult = {
   hasRefreshToken: boolean;
 };
 
-async function startCallbackServer(): Promise<{
+export async function startCallbackServer(): Promise<{
   redirectUri: string;
   waitForCode: Promise<string>;
 }> {
@@ -114,7 +114,23 @@ export async function authorizeAccount(
 
   const code = await waitForCode;
   const { tokens } = await oauth2Client.getToken(code);
-  const hasRefreshToken = Boolean(tokens.refresh_token);
+
+  // Google omits refresh_token on a repeat consent for an already-authorized
+  // app. If we blindly wrote `tokens` over the existing file in that case,
+  // we would discard a working refresh token and turn a healthy account
+  // into a broken one. Fall back to whatever refresh token is already on
+  // disk, tolerating a missing or corrupt existing file.
+  let existingRefreshToken: string | undefined;
+  try {
+    const existingRaw = fs.readFileSync(config.tokenPath, "utf8");
+    const existing = JSON.parse(existingRaw) as { refresh_token?: string };
+    existingRefreshToken = existing.refresh_token ?? undefined;
+  } catch {
+    // No existing token file, or it is unreadable/corrupt — nothing to merge in.
+  }
+
+  const mergedTokens = { ...tokens, refresh_token: tokens.refresh_token ?? existingRefreshToken };
+  const hasRefreshToken = Boolean(mergedTokens.refresh_token);
 
   if (!hasRefreshToken) {
     console.warn("Authorization succeeded, but Google did not return a refresh token.");
@@ -122,12 +138,15 @@ export async function authorizeAccount(
   }
 
   fs.mkdirSync(path.dirname(config.tokenPath), { recursive: true });
-  fs.writeFileSync(config.tokenPath, JSON.stringify(tokens, null, 2), { mode: 0o600 });
+  fs.writeFileSync(config.tokenPath, JSON.stringify(mergedTokens, null, 2), { mode: 0o600 });
+  // writeFileSync's `mode` is ignored when the file already exists, so this
+  // chmod is the only thing that repairs a pre-existing 0644 token file on
+  // re-authorization. Do not remove it as "redundant" with the mode above.
   fs.chmodSync(config.tokenPath, 0o600);
 
   let email: string | undefined;
   try {
-    oauth2Client.setCredentials(tokens);
+    oauth2Client.setCredentials(mergedTokens);
     const gmail = google.gmail({ version: "v1", auth: oauth2Client });
     const profile = await gmail.users.getProfile({ userId: "me" });
     email = profile.data.emailAddress ?? undefined;
@@ -135,7 +154,7 @@ export async function authorizeAccount(
       setAccountEmail(alias, email);
     }
   } catch {
-    // The token is already saved. A failed profile lookup only costs the stored email.
+    console.warn(`Could not read the email address for "${alias}". The token was saved successfully.`);
   }
 
   console.log(`Saved OAuth token for "${alias}"${email ? ` (${email})` : ""} to ${config.tokenPath}.`);

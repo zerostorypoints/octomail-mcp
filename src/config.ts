@@ -5,7 +5,18 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 
-dotenv.config({ quiet: true });
+// Load only this project's own .env (resolved relative to this module, not
+// the process cwd). MCP clients launch this server with cwd set to whatever
+// project the user happens to be sitting in, and dotenv's default
+// `override: false` means whichever .env loads first wins a given key. A
+// cwd .env belonging to an unrelated project — unremarkable in any project
+// doing Google auth — would otherwise silently shadow GOOGLE_CLIENT_ID,
+// GOOGLE_CLIENT_SECRET, GMAIL_MCP_ACCOUNTS_FILE, or GMAIL_MCP_TOKEN_DIR and
+// point this server at the wrong credentials or the wrong accounts file.
+// Do not add a second `dotenv.config()` call for the cwd: there is no
+// documented use case for it, and every real override path (per-client env
+// vars passed via `claude mcp add --env ...` / `claude_desktop_config.json`)
+// already works because those set process.env before this module loads.
 dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".env"), quiet: true });
 
 export type RawAccountEntry = {
