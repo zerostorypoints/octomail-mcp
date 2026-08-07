@@ -32,5 +32,8 @@ jobs:
 
       - run: npm test
 
-      - name: Check for leaked personal identifiers
-        run: '! grep -rniE "<user>|work|support" README.md docs/*.md .env.example accounts.example.json SECURITY.md src/'
+      # Absolute home directory paths are the way a contributor's local layout
+      # leaks into shipped files. Naming specific private aliases here would
+      # publish the very strings the check exists to keep out.
+      - name: Check for leaked local paths
+        run: '! grep -rnE "/(Users|home)/[a-z]" README.md docs/*.md .env.example accounts.example.json SECURITY.md src/'
