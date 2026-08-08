@@ -257,7 +257,10 @@ export function registerFilterTools(server: McpServer): void {
             const labels = (await gmail.users.labels.list({ userId: "me" })).data.labels ?? [];
             const names = labelNamesById(labels);
             const addLabelNames = addLabelIds.map((id) => names.get(id) ?? id);
-            assertDestructiveLabelsConfirmed(addLabelNames, confirm, "gmail_backfill_filter");
+            // TRASH/SPAM are stable, non-localizable label IDs; addLabelNames
+            // alone would miss them if Gmail ever returned a display name
+            // other than "TRASH"/"SPAM" for those system labels.
+            assertDestructiveLabelsConfirmed([...addLabelIds, ...addLabelNames], confirm, "gmail_backfill_filter");
           }
 
           const list = await gmail.users.messages.list({ userId: "me", q: query, maxResults, pageToken });
