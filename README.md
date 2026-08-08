@@ -46,6 +46,32 @@ The setup wizard collects your OAuth client credentials, authorizes each
 account in the browser, verifies every configured account, and prints the
 config blocks you paste into your MCP client.
 
+## Starting with Claude
+
+Once the quickstart above has run, register the server with Claude Code:
+
+```bash
+claude mcp add octomail --env OCTOMAIL_ACCOUNTS_FILE=/path/to/octomail-mcp/accounts.json -- node /path/to/octomail-mcp/dist/server.js
+```
+
+`npm run setup -- --print-config` prints this command with the real paths for
+your checkout, plus the equivalent blocks for Claude Desktop and Codex — see
+[docs/clients.md](docs/clients.md) for those. Then start a new Claude session
+and try:
+
+- "List my Gmail accounts" — confirms the server is wired up and shows the
+  aliases you configured.
+- "Search work for invoices from last month" — reads mail on the `work`
+  alias.
+- "Help me clean up my personal inbox" — Claude can survey the mailbox,
+  propose labels and filters, and backfill them; give it
+  [docs/filter-playbook.md](docs/filter-playbook.md) for the field-tested
+  workflow to follow.
+
+Claude asks before anything state-changing, and the server refuses trash,
+spam, and deletion actions unless the call carries an explicit
+`confirm: true` (see Safety above).
+
 ## Tools
 
 - `gmail_list_accounts`
