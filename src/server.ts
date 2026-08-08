@@ -3,7 +3,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadAccountsConfig } from "./config.js";
-import { describeAccountError, encodeMimeMessage, gmailForAccount, messageHeader, resolveLabelNames, summarizeMessage } from "./gmail.js";
+import { describeAccountError, encodeMimeMessage, gmailForAccount, messageHeader, summarizeMessage } from "./gmail.js";
+import { registerLabelTools } from "./labels.js";
 import { accountShape, safeTool } from "./tools.js";
 
 const server = new McpServer({
@@ -177,48 +178,6 @@ server.tool(
     }, account),
 );
 
-server.tool("gmail_list_labels", "List Gmail labels for an account.", accountShape, async ({ account }) =>
-  safeTool(async () => {
-    const gmail = await gmailForAccount(account);
-    const response = await gmail.users.labels.list({ userId: "me" });
-    return response.data.labels ?? [];
-  }, account),
-);
-
-server.tool(
-  "gmail_apply_labels",
-  "Add and/or remove labels on Gmail messages. Label names may also be Gmail label IDs.",
-  {
-    ...accountShape,
-    messageIds: z.array(z.string().min(1)).min(1),
-    addLabelNames: z.array(z.string().min(1)).optional(),
-    removeLabelNames: z.array(z.string().min(1)).optional(),
-  },
-  async ({ account, messageIds, addLabelNames, removeLabelNames }) =>
-    safeTool(async () => {
-      const gmail = await gmailForAccount(account);
-      const addLabelIds = await resolveLabelNames(gmail, addLabelNames);
-      const removeLabelIds = await resolveLabelNames(gmail, removeLabelNames);
-
-      const results = await Promise.all(
-        messageIds.map((id) =>
-          gmail.users.messages.modify({
-            userId: "me",
-            id,
-            requestBody: {
-              addLabelIds,
-              removeLabelIds,
-            },
-          }),
-        ),
-      );
-
-      return {
-        modified: results.map((result) => result.data.id),
-      };
-    }, account),
-);
-
 server.tool(
   "gmail_archive",
   "Archive Gmail messages by removing the INBOX label.",
@@ -292,6 +251,8 @@ server.tool(
       return draft.data;
     }, account),
 );
+
+registerLabelTools(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
