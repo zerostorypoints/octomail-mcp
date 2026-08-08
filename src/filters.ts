@@ -8,6 +8,7 @@ import {
   isScopeInsufficientError,
   readAccountToken,
   resolveLabelNames,
+  summarizeMessage,
   tokenHasScope,
 } from "./gmail.js";
 import { accountShape, safeTool } from "./tools.js";
@@ -212,6 +213,88 @@ export function registerFilterTools(server: McpServer): void {
 
           await gmail.users.settings.filters.delete({ userId: "me", id: filterId });
           return { deleted: filterId, definition: described };
+        });
+      }, account),
+  );
+
+  server.tool(
+    "gmail_backfill_filter",
+    "Apply an existing filter's labels to mail already in the mailbox. Dry run by default: reports what would change and modifies nothing until apply is true. The filter's forward action is deliberately ignored.",
+    {
+      ...accountShape,
+      filterId: z.string().min(1),
+      apply: z.boolean().optional().default(false).describe("True actually modifies messages."),
+      maxResults: z.number().int().min(1).max(1000).optional().default(500),
+    },
+    async ({ account, filterId, apply, maxResults }) =>
+      safeTool(async () => {
+        const gmail = await gmailWithFilterScope(account);
+        return await withScopeErrors(account, async () => {
+          const existing = await gmail.users.settings.filters.get({ userId: "me", id: filterId });
+          const filter = existing.data;
+          const query = criteriaToQuery(filter.criteria ?? {}).trim();
+
+          if (!query) {
+            throw new Error(
+              `Filter ${filterId} has no translatable criteria — refusing to backfill, since an empty query matches every message in the mailbox.`,
+            );
+          }
+
+          const addLabelIds = filter.action?.addLabelIds ?? [];
+          const removeLabelIds = filter.action?.removeLabelIds ?? [];
+
+          if (!addLabelIds.length && !removeLabelIds.length) {
+            throw new Error(`Filter ${filterId} has no label actions to apply. Nothing to backfill.`);
+          }
+
+          const list = await gmail.users.messages.list({ userId: "me", q: query, maxResults });
+          const ids = (list.data.messages ?? []).map((message) => message.id).filter((id): id is string => Boolean(id));
+          const [described] = await describeFilters(gmail, [filter]);
+
+          if (!apply) {
+            const sample = await Promise.all(
+              ids.slice(0, 10).map(async (id) => {
+                const detail = await gmail.users.messages.get({
+                  userId: "me",
+                  id,
+                  format: "metadata",
+                  metadataHeaders: ["From", "Subject", "Date"],
+                });
+                return summarizeMessage(detail.data).headers;
+              }),
+            );
+
+            return {
+              dryRun: true,
+              query,
+              addLabels: described.addLabels,
+              removeLabels: described.removeLabels,
+              matchedEstimate: list.data.resultSizeEstimate,
+              wouldModify: ids.length,
+              sample,
+              message:
+                "Nothing was modified. This query approximates Gmail's filter matching — check the sample, then call again with apply: true.",
+            };
+          }
+
+          if (ids.length) {
+            await gmail.users.messages.batchModify({
+              userId: "me",
+              requestBody: { ids, addLabelIds, removeLabelIds },
+            });
+          }
+
+          return {
+            dryRun: false,
+            query,
+            addLabels: described.addLabels,
+            removeLabels: described.removeLabels,
+            modified: ids.length,
+            message:
+              ids.length === maxResults
+                ? `Hit the ${maxResults}-message cap. Run again to continue through the backlog.`
+                : "Backfill complete.",
+          };
         });
       }, account),
   );
