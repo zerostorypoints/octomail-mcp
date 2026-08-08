@@ -55,16 +55,16 @@ config blocks you paste into your MCP client.
 - `gmail_read_message(account, messageId)`
 - `gmail_read_thread(account, threadId)`
 - `gmail_list_labels(account)`
-- `gmail_apply_labels(account, messageIds, addLabelNames?, removeLabelNames?)`
+- `gmail_apply_labels(account, messageIds, addLabelNames?, removeLabelNames?, confirm?)`
 - `gmail_create_label(account, name, textColor?, backgroundColor?, labelListVisibility?, messageListVisibility?)`
 - `gmail_update_label(account, label, newName?, textColor?, backgroundColor?, labelListVisibility?, messageListVisibility?, renameDescendants?)`
 - `gmail_delete_label(account, label, confirm?)`
 - `gmail_archive(account, messageIds)`
 - `gmail_create_draft(account, to, subject, body, cc?, bcc?, replyToMessageId?)`
 - `gmail_list_filters(account)`
-- `gmail_create_filter(account, criteria…, addLabelNames?, removeLabelNames?, forward?)`
+- `gmail_create_filter(account, from?, to?, subject?, query?, negatedQuery?, hasAttachment?, excludeChats?, size?, sizeComparison?, addLabelNames?, removeLabelNames?, forward?, confirm?)`
 - `gmail_delete_filter(account, filterId, confirm?)`
-- `gmail_backfill_filter(account, filterId, apply?, maxResults?)`
+- `gmail_backfill_filter(account, filterId, apply?, maxResults?, pageToken?, confirm?)`
 
 ## Documentation
 
