@@ -200,7 +200,17 @@ export function isScopeInsufficientError(error: unknown): boolean {
 
   const candidate = error as {
     message?: unknown;
-    response?: { data?: { error_description?: unknown } };
+    response?: {
+      status?: unknown;
+      data?: {
+        error_description?: unknown;
+        error?: {
+          message?: unknown;
+          details?: unknown;
+          errors?: unknown;
+        };
+      };
+    };
   };
 
   const description = candidate.response?.data?.error_description;
@@ -208,7 +218,41 @@ export function isScopeInsufficientError(error: unknown): boolean {
     return true;
   }
 
-  return typeof candidate.message === "string" && candidate.message.includes("ACCESS_TOKEN_SCOPE_INSUFFICIENT");
+  if (typeof candidate.message === "string" && candidate.message.includes("ACCESS_TOKEN_SCOPE_INSUFFICIENT")) {
+    return true;
+  }
+
+  // The shape Gmail actually returns: a GaxiosError whose top-level message is
+  // just "Request failed with status code 403", with the real detail buried in
+  // response.data.error.
+  const gmailError = candidate.response?.data?.error;
+
+  const status = candidate.response?.status;
+  const message = gmailError?.message;
+  if (status === 403 && typeof message === "string" && message.toLowerCase().includes("insufficient authentication scopes")) {
+    return true;
+  }
+
+  const details = gmailError?.details;
+  if (Array.isArray(details) && details.some((entry) => isRecordWithReason(entry, "ACCESS_TOKEN_SCOPE_INSUFFICIENT"))) {
+    return true;
+  }
+
+  const errors = gmailError?.errors;
+  if (Array.isArray(errors) && errors.some((entry) => isRecordWithReason(entry, "insufficientPermissions"))) {
+    return true;
+  }
+
+  return false;
+}
+
+function isRecordWithReason(value: unknown, reason: string): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "reason" in value &&
+    (value as { reason?: unknown }).reason === reason
+  );
 }
 
 export function describeMissingFilterScope(account: string): string {

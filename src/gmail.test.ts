@@ -74,6 +74,82 @@ test("isScopeInsufficientError ignores unrelated errors", () => {
   assert.equal(isScopeInsufficientError(null), false);
 });
 
+test("isScopeInsufficientError detects a real Gmail 403 body via status + message", () => {
+  assert.equal(
+    isScopeInsufficientError({
+      message: "Request failed with status code 403",
+      response: {
+        status: 403,
+        data: {
+          error: {
+            code: 403,
+            message: "Request had insufficient authentication scopes.",
+            errors: [{ reason: "somethingElse" }],
+          },
+        },
+      },
+    }),
+    true,
+  );
+});
+
+test("isScopeInsufficientError detects ACCESS_TOKEN_SCOPE_INSUFFICIENT in error.details", () => {
+  assert.equal(
+    isScopeInsufficientError({
+      message: "Request failed with status code 403",
+      response: {
+        status: 403,
+        data: {
+          error: {
+            code: 403,
+            message: "Request had insufficient authentication scopes.",
+            details: [{ reason: "ACCESS_TOKEN_SCOPE_INSUFFICIENT" }],
+          },
+        },
+      },
+    }),
+    true,
+  );
+});
+
+test("isScopeInsufficientError detects insufficientPermissions in error.errors", () => {
+  assert.equal(
+    isScopeInsufficientError({
+      message: "Request failed with status code 403",
+      response: {
+        status: 403,
+        data: {
+          error: {
+            code: 403,
+            message: "Request had insufficient authentication scopes.",
+            errors: [{ reason: "insufficientPermissions" }],
+          },
+        },
+      },
+    }),
+    true,
+  );
+});
+
+test("isScopeInsufficientError does not match an unrelated plain 403", () => {
+  assert.equal(
+    isScopeInsufficientError({
+      message: "Request failed with status code 403",
+      response: {
+        status: 403,
+        data: {
+          error: {
+            code: 403,
+            message: "The user does not have sufficient permissions for this resource.",
+            errors: [{ reason: "forbidden" }],
+          },
+        },
+      },
+    }),
+    false,
+  );
+});
+
 test("describeMissingFilterScope names the account and the re-auth command", () => {
   const message = describeMissingFilterScope("work");
   assert.match(message, /Gmail account "work"/);
