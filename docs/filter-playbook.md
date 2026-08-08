@@ -1,8 +1,10 @@
 # A Gmail filter playbook
 
-Lessons from cleaning up a real, years-old mailbox with Octomail: ~1000
-messages, a dozen machine senders, one filter to start with, and an agent doing
-the work with a human approving each step. Everything below was learned by
+Lessons from cleaning up two real, years-old mailboxes with Octomail. The
+first: ~1000 messages, a dozen machine senders, one filter to start with.
+The second: 48,000 messages, ~70 filters, and seven independent review
+rounds before the filters were provably safe. In both, an agent did the
+work with a human approving each step. Everything below was learned by
 getting it wrong first, so you don't have to.
 
 ## The goal, stated correctly
@@ -31,7 +33,19 @@ cannot write a filter for.
    an agent did the sorting, have a *different* agent try to falsify the
    result — every independent verification pass in our run found something the
    author had missed.
-6. **Iterate.** Clearing the loud noise reveals the quiet noise underneath.
+6. **Run creation and verification as a loop, not a sequence.** Don't verify
+   once at the end — alternate rounds of filter work with a *fresh*
+   independent reviewer each time, and only stop on an ACCEPT with zero
+   findings. A second mailbox cleanup run this way took seven rounds: two
+   early accepts, then four consecutive rejections that each exposed a
+   different defect class (subject-stemming gaps, a transactional subdomain,
+   stale labels, a missing language), then a clean accept. No single pass —
+   however careful — found more than one of those classes; the loop found
+   them all. Give each reviewer the journal of what was done, the invariant
+   list, and explicit license to probe creatively (multilingual subjects,
+   receipt vocabulary, auth vocabulary) rather than just re-running the
+   author's own checks.
+7. **Iterate.** Clearing the loud noise reveals the quiet noise underneath.
    Expect two or three rounds before the inbox is honest.
 
 ## The lessons
@@ -144,7 +158,52 @@ confirmations, invoices. For classes over a few hundred messages, the web
 UI's select-all-matching is one deterministic action and beats looping an
 API that throttles bulk modifies.
 
-### 10. The payoff is what the noise was hiding
+### 10. Gmail subject matching does not stem
+
+`subject:confirm` does not match "Confirmation". `subject:login` does not
+match "log in". A carve-out that names "code" still archives a message whose
+subject says "PIN". Every auth carve-out we wrote with a three-word
+vocabulary leaked, and each leak was a different spelling of the same
+intent. Write carve-outs with the full family — verify, verified,
+verification, code, PIN, confirm, confirmation, password, login, "log in",
+"magic link", "sign in", "one-time", OTP, "action required", activate — and
+in **every language the sender writes** (a Polish shop's account mail says
+"Potwierdź" and "hasło", and no English list will ever catch it). Then
+accept that the list is still incomplete, which is what the verification
+loop (workflow step 6) is for.
+
+### 11. Editing a filter does not re-sort old mail
+
+Backfill happens under the filter that existed at the time. When you later
+widen a carve-out, everything labeled under the old, narrower rule keeps its
+label — the mail your new negation would now protect is still sitting in
+the bulk pile. After every carve-out edit, run the negation's terms as a
+*positive* query against that sender's bulk label and repair the hits.
+
+### 12. A growing blocklist means stop filtering that sender
+
+This is lesson 2 biting harder. Our exchange filter's carve-out grew from
+three terms to twenty-three across four review rounds — codes, delistings,
+KYC demands, funding changes, distribution records — and a fresh reviewer
+still found account-critical mail under the bulk label. The fix was not a
+twenty-fourth term: it was deleting the skip-inbox filter entirely and
+giving the sender a label-only Ops treatment. For any sender that holds
+your money or your identity (exchanges, banks, brokers), weekly marketing
+in the inbox is cheaper than one archived KYC deadline.
+
+### 13. The marketing subdomain carries transactional mail too
+
+Lesson 3's nastiest variant: the *same subdomain* you verified as
+"marketing only" can host a transactional sender you never sampled.
+`deals.banggood.com` sends newsletters from `newsletter@` — and order
+receipts from `trigger@`. And Gmail's `from:` is a suffix match, so a
+filter on `email.playstation.com` also catches `txn-email.playstation.com`.
+Scope filters to the full address (`newsletter@deals.example.com`), not the
+subdomain, unless you have positively enumerated every local-part on it —
+and when auditing, search the domain under its bulk label and read the
+distinct senders that actually got caught.
+
+### 14. The payoff is what the noise was hiding
 
 The point of all this was never tidiness. Clearing ~40 machine messages a
 month exposed, in one mailbox: a hosting plan at 300% of quota, a mandatory
