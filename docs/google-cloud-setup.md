@@ -80,12 +80,19 @@ You have three options, in order of convenience:
 | Scope | Why |
 | --- | --- |
 | `gmail.readonly` | Search, read messages and threads, list labels |
-| `gmail.modify` | Apply and remove labels, archive messages |
+| `gmail.modify` | Apply and remove labels, archive messages — including adding `TRASH`/`SPAM`, which trashes or spams a message |
 | `gmail.compose` | Create drafts |
 | `gmail.settings.basic` | List, create, and delete filters |
 
-There is deliberately no scope, and no tool, for sending mail or for trashing
-or deleting anything.
+There is deliberately **no tool that sends mail or deletes a message**. But
+`TRASH` and `SPAM` are ordinary Gmail labels, and adding either one — via
+`gmail_apply_labels`, as a standing rule via `gmail_create_filter`, or applied
+to existing mail via `gmail_backfill_filter` — does trash or spam the message,
+and Gmail purges trashed and spammed mail after 30 days. Adding `TRASH` or
+`SPAM` is therefore the one label pair that requires an explicit
+`confirm: true`; without it the call is refused and nothing changes. Removing
+them is a recovery action and is not gated. See [SECURITY.md](../SECURITY.md)
+for the full policy.
 
 ## 8. Personal Gmail vs Google Workspace
 

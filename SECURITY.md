@@ -7,7 +7,7 @@ This MCP server talks to the Gmail API on your behalf using these OAuth scopes:
 | Scope | Why |
 | --- | --- |
 | `gmail.readonly` | Search, read messages and threads, list labels |
-| `gmail.modify` | Apply and remove labels, archive messages |
+| `gmail.modify` | Apply and remove labels, archive messages — including adding `TRASH`/`SPAM`, which trashes or spams a message |
 | `gmail.compose` | Create drafts |
 | `gmail.settings.basic` | List, create, and delete filters |
 
