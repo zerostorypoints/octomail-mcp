@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadAccountsConfig } from "./config.js";
+import { registerFilterTools } from "./filters.js";
 import { describeAccountError, encodeMimeMessage, gmailForAccount, messageHeader, summarizeMessage } from "./gmail.js";
 import { registerLabelTools } from "./labels.js";
 import { accountShape, safeTool } from "./tools.js";
@@ -253,6 +254,7 @@ server.tool(
 );
 
 registerLabelTools(server);
+registerFilterTools(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

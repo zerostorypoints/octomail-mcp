@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { gmail_v1 } from "googleapis";
 import { z } from "zod";
+import { filtersReferencingLabel } from "./filters.js";
 import { gmailForAccount, resolveLabelNames } from "./gmail.js";
 import { accountShape, safeTool } from "./tools.js";
 
@@ -227,18 +228,30 @@ export function registerLabelTools(server: McpServer): void {
         const detail = await gmail.users.labels.get({ userId: "me", id: target.id as string });
         const children = descendantsOf(target.name ?? "", all.map((entry) => entry.name ?? ""));
 
+        // A filter pointing at a deleted label is silently broken, and the
+        // Gmail UI never warns about it. Degrade quietly if the account has no
+        // filter scope — the label deletion itself does not need it.
+        let referencingFilters: string[] = [];
+        try {
+          const found = await filtersReferencingLabel(gmail, target.id as string);
+          referencingFilters = found.map((entry) => entry.id ?? "(unknown)");
+        } catch {
+          referencingFilters = [];
+        }
+
         if (!confirm) {
           return {
             wouldDelete: target.name,
             messagesTotal: detail.data.messagesTotal ?? 0,
             threadsTotal: detail.data.threadsTotal ?? 0,
             orphanedDescendants: children,
+            referencingFilters,
             message: "Nothing was deleted. Call again with confirm: true to delete this label.",
           };
         }
 
         await gmail.users.labels.delete({ userId: "me", id: target.id as string });
-        return { deleted: target.name, orphanedDescendants: children };
+        return { deleted: target.name, orphanedDescendants: children, referencingFilters };
       }, account),
   );
 }
