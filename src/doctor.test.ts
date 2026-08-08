@@ -95,3 +95,35 @@ test("checkAccounts warns when the token predates the filter scope", async () =>
     teardown();
   }
 });
+
+test("checkAccounts does not warn when the token already has the filter scope", async () => {
+  setup();
+  try {
+    fs.writeFileSync(process.env.OCTOMAIL_ACCOUNTS_FILE as string, JSON.stringify({ accounts: { work: {} } }));
+
+    const tokenPath = path.join(workDir, "tokens", "work.json");
+    fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
+    fs.writeFileSync(
+      tokenPath,
+      JSON.stringify({
+        refresh_token: "r",
+        scope:
+          "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.settings.basic",
+      }),
+    );
+    fs.chmodSync(tokenPath, 0o600);
+
+    const fakeGmailClient: typeof gmailForAccount = (async () =>
+      ({
+        users: { getProfile: async () => ({ data: { emailAddress: "work@example.com" } }) },
+      }) as unknown as Awaited<ReturnType<typeof gmailForAccount>>) as typeof gmailForAccount;
+
+    const result = await checkAccounts(fakeGmailClient);
+
+    const filterLine = result.lines.find((entry) => /filter/i.test(entry));
+    assert.equal(filterLine, undefined, `expected no filter-scope line, got: ${JSON.stringify(result.lines)}`);
+    assert.equal(result.ok, true);
+  } finally {
+    teardown();
+  }
+});
