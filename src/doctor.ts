@@ -3,7 +3,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { accountsConfigPath, loadAccountsConfig, loadOAuthCredentials, type AccountsConfig } from "./config.js";
-import { describeAccountError, gmailForAccount } from "./gmail.js";
+import { FILTER_SCOPE, describeAccountError, gmailForAccount, readAccountToken, tokenHasScope } from "./gmail.js";
 
 export type DoctorReport = { ok: boolean; lines: string[] };
 
@@ -110,6 +110,17 @@ export async function checkAccounts(
     } catch {
       // Token file vanished/rotated between existsSync and statSync — the getProfile
       // check below is the real signal for this account, so don't fail it here.
+    }
+
+    try {
+      if (tokenHasScope(readAccountToken(alias), FILTER_SCOPE) === false) {
+        lines.push(
+          `! ${alias.padEnd(width)}— no filter scope, run: npm run auth -- --account ${alias}`,
+        );
+      }
+    } catch {
+      // Unreadable or malformed token — the getProfile check below is the real
+      // signal for this account, so don't add noise here.
     }
 
     try {

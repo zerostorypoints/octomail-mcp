@@ -82,6 +82,7 @@ You have three options, in order of convenience:
 | `gmail.readonly` | Search, read messages and threads, list labels |
 | `gmail.modify` | Apply and remove labels, archive messages |
 | `gmail.compose` | Create drafts |
+| `gmail.settings.basic` | List, create, and delete filters |
 
 There is deliberately no scope, and no tool, for sending mail or for trashing
 or deleting anything.
