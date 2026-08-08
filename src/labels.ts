@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { gmail_v1 } from "googleapis";
 import { z } from "zod";
 import { filtersReferencingLabel } from "./filters.js";
-import { gmailForAccount, resolveLabelNames } from "./gmail.js";
+import { gmailForAccount, isScopeInsufficientError, resolveLabelNames } from "./gmail.js";
 import { accountShape, safeTool } from "./tools.js";
 
 // Gmail rejects any colour outside this predefined palette. Verified complete
@@ -229,14 +229,20 @@ export function registerLabelTools(server: McpServer): void {
         const children = descendantsOf(target.name ?? "", all.map((entry) => entry.name ?? ""));
 
         // A filter pointing at a deleted label is silently broken, and the
-        // Gmail UI never warns about it. Degrade quietly if the account has no
-        // filter scope — the label deletion itself does not need it.
+        // Gmail UI never warns about it. A missing filter scope is expected —
+        // label deletion does not need it — so degrade quietly there. Any other
+        // failure must NOT masquerade as "no filters reference this label",
+        // because this report is what the user confirms an irreversible delete
+        // against.
         let referencingFilters: string[] = [];
+        let filterCheckWarning: string | undefined;
         try {
           const found = await filtersReferencingLabel(gmail, target.id as string);
           referencingFilters = found.map((entry) => entry.id ?? "(unknown)");
-        } catch {
-          referencingFilters = [];
+        } catch (error) {
+          if (!isScopeInsufficientError(error)) {
+            filterCheckWarning = `Could not check which filters reference this label: ${error instanceof Error ? error.message : String(error)}`;
+          }
         }
 
         if (!confirm) {
@@ -246,12 +252,18 @@ export function registerLabelTools(server: McpServer): void {
             threadsTotal: detail.data.threadsTotal ?? 0,
             orphanedDescendants: children,
             referencingFilters,
+            ...(filterCheckWarning ? { filterCheckWarning } : {}),
             message: "Nothing was deleted. Call again with confirm: true to delete this label.",
           };
         }
 
         await gmail.users.labels.delete({ userId: "me", id: target.id as string });
-        return { deleted: target.name, orphanedDescendants: children, referencingFilters };
+        return {
+          deleted: target.name,
+          orphanedDescendants: children,
+          referencingFilters,
+          ...(filterCheckWarning ? { filterCheckWarning } : {}),
+        };
       }, account),
   );
 }
