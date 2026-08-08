@@ -1,5 +1,5 @@
 // Gmail rejects any colour outside this predefined palette. Verified complete
-// against the reference on 2026-08-07 (100 values). Source:
+// against the reference on 2026-08-07 (102 values). Source:
 // https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.labels#Label.Color
 export const LABEL_COLORS: readonly string[] = [
   "#000000", "#434343", "#666666", "#999999", "#cccccc", "#efefef", "#f3f3f3", "#ffffff",
