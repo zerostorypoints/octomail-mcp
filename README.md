@@ -8,12 +8,25 @@ authorizes and stores its credentials independently.
 
 ## Safety
 
-The tool list below deliberately excludes send, trash, and delete — there is
-no way to lose mail or mail it out through this server. The most destructive
-action available is `gmail_archive`, which only removes the `INBOX` label;
-nothing is ever permanently removed. OAuth tokens are stored locally at file
-mode `0600`. See [SECURITY.md](SECURITY.md) for the full policy and how to
-report a vulnerability.
+The tool list below deliberately excludes send: no tool composes and sends a
+message, and `gmail_create_draft` only ever creates a draft. The one way mail
+can leave an account is `gmail_create_filter`'s optional `forward` action,
+which installs a standing Gmail rule — and Gmail only accepts an address you
+have already verified on that account, which this server has no scope to do
+for you. No tool ever deletes a message outright, but `TRASH` and `SPAM` are
+ordinary Gmail labels, and adding either one to a message — directly via
+`gmail_apply_labels`, as a standing rule via `gmail_create_filter`, or applied
+to existing mail via `gmail_backfill_filter` — does trash or spam it, and
+Gmail purges trashed and spammed mail after 30 days. That is the one label
+pair this server gates: adding `TRASH` or `SPAM` requires an explicit
+`confirm: true`, and without it the call is refused and nothing changes;
+removing them is a recovery action and is never gated. The other most
+destructive actions available are deleting a label or a filter, which also
+require an explicit `confirm: true` — without it they return an impact report
+and change nothing. Deleting a label does not delete the messages that
+carried it, only their categorisation. OAuth tokens are stored locally at
+file mode `0600`. See [SECURITY.md](SECURITY.md) for the full policy and how
+to report a vulnerability.
 
 ## Requirements
 
@@ -42,9 +55,16 @@ config blocks you paste into your MCP client.
 - `gmail_read_message(account, messageId)`
 - `gmail_read_thread(account, threadId)`
 - `gmail_list_labels(account)`
-- `gmail_apply_labels(account, messageIds, addLabelNames?, removeLabelNames?)`
+- `gmail_apply_labels(account, messageIds, addLabelNames?, removeLabelNames?, confirm?)`
+- `gmail_create_label(account, name, textColor?, backgroundColor?, labelListVisibility?, messageListVisibility?)`
+- `gmail_update_label(account, label, newName?, textColor?, backgroundColor?, labelListVisibility?, messageListVisibility?, renameDescendants?)`
+- `gmail_delete_label(account, label, confirm?)`
 - `gmail_archive(account, messageIds)`
 - `gmail_create_draft(account, to, subject, body, cc?, bcc?, replyToMessageId?)`
+- `gmail_list_filters(account)`
+- `gmail_create_filter(account, from?, to?, subject?, query?, negatedQuery?, hasAttachment?, excludeChats?, size?, sizeComparison?, addLabelNames?, removeLabelNames?, forward?, confirm?)`
+- `gmail_delete_filter(account, filterId, confirm?)`
+- `gmail_backfill_filter(account, filterId, apply?, maxResults?, pageToken?, confirm?)`
 
 ## Documentation
 

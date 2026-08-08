@@ -27,6 +27,23 @@ re-authorize the affected account:
 npm run auth -- --account <alias>
 ```
 
+## `... was authorized before Octomail requested filter access`
+
+Filter tools need the `gmail.settings.basic` scope, which was added after the
+first release. Accounts authorized before that have tokens without it. Every
+other tool keeps working; only the filter tools fail.
+
+Fix it per account:
+
+    npm run auth -- --account <alias>
+
+Approve the additional permission on the consent screen. `npm run doctor` marks
+affected accounts with a `!` line reading "no filter scope".
+
+If you are a Google Workspace admin and the consent screen refuses the scope for
+your domain, allow the OAuth client under **Admin console > Security > Access and
+data control > API controls > Manage third-party app access**.
+
 ## "Google did not return a refresh token"
 
 **Cause:** This Gmail account was already authorized once before, and Google

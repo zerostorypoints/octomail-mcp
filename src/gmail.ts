@@ -3,10 +3,13 @@ import { google, gmail_v1 } from "googleapis";
 import { Credentials, OAuth2Client } from "google-auth-library";
 import { getAccountConfig, loadOAuthCredentials } from "./config.js";
 
+export const FILTER_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic";
+
 export const GMAIL_SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/gmail.modify",
   "https://www.googleapis.com/auth/gmail.compose",
+  FILTER_SCOPE,
 ] as const;
 
 export function createOAuthClient(redirectUri = "http://127.0.0.1"): OAuth2Client {
@@ -14,7 +17,7 @@ export function createOAuthClient(redirectUri = "http://127.0.0.1"): OAuth2Clien
   return new google.auth.OAuth2(credentials.clientId, credentials.clientSecret, redirectUri);
 }
 
-export async function gmailForAccount(account: string): Promise<gmail_v1.Gmail> {
+export function readAccountToken(account: string): Credentials {
   const accountConfig = getAccountConfig(account);
   if (!fs.existsSync(accountConfig.tokenPath)) {
     throw new Error(
@@ -22,7 +25,11 @@ export async function gmailForAccount(account: string): Promise<gmail_v1.Gmail> 
     );
   }
 
-  const token = JSON.parse(fs.readFileSync(accountConfig.tokenPath, "utf8")) as Credentials;
+  return JSON.parse(fs.readFileSync(accountConfig.tokenPath, "utf8")) as Credentials;
+}
+
+export async function gmailForAccount(account: string): Promise<gmail_v1.Gmail> {
+  const token = readAccountToken(account);
   const oauth2Client = createOAuthClient();
   oauth2Client.setCredentials(token);
   return google.gmail({ version: "v1", auth: oauth2Client });
@@ -174,4 +181,89 @@ export function describeAccountError(account: string, error: unknown): string {
   }
 
   return error instanceof Error ? error.message : String(error);
+}
+
+// Returns undefined when the stored token records no scope at all — tokens
+// written before this field was persisted. Callers treat undefined as "unknown"
+// and fall back to letting Google answer.
+export function tokenHasScope(token: { scope?: string | null }, scope: string): boolean | undefined {
+  if (typeof token.scope !== "string" || token.scope.length === 0) {
+    return undefined;
+  }
+  return token.scope.split(/\s+/).includes(scope);
+}
+
+export function isScopeInsufficientError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as {
+    message?: unknown;
+    response?: {
+      status?: unknown;
+      data?: {
+        error_description?: unknown;
+        error?: {
+          message?: unknown;
+          details?: unknown;
+          errors?: unknown;
+        };
+      };
+    };
+  };
+
+  const description = candidate.response?.data?.error_description;
+  if (typeof description === "string" && description.toLowerCase().includes("insufficient authentication scopes")) {
+    return true;
+  }
+
+  if (typeof candidate.message === "string" && candidate.message.includes("ACCESS_TOKEN_SCOPE_INSUFFICIENT")) {
+    return true;
+  }
+
+  // The shape Gmail actually returns: a GaxiosError whose top-level message is
+  // just "Request failed with status code 403", with the real detail buried in
+  // response.data.error.
+  const gmailError = candidate.response?.data?.error;
+
+  const status = candidate.response?.status;
+  const message = gmailError?.message;
+  if (status === 403 && typeof message === "string" && message.toLowerCase().includes("insufficient authentication scopes")) {
+    return true;
+  }
+
+  const details = gmailError?.details;
+  if (Array.isArray(details) && details.some((entry) => isRecordWithReason(entry, "ACCESS_TOKEN_SCOPE_INSUFFICIENT"))) {
+    return true;
+  }
+
+  // Gmail returns the "insufficientPermissions" reason for genuine
+  // resource-permission denials too, not only missing OAuth scopes — pair it
+  // with the 403 status the way the message branch above does, so a
+  // resource-permission failure isn't misreported as fixable by re-running
+  // npm run auth.
+  const errors = gmailError?.errors;
+  if (status === 403 && Array.isArray(errors) && errors.some((entry) => isRecordWithReason(entry, "insufficientPermissions"))) {
+    return true;
+  }
+
+  return false;
+}
+
+function isRecordWithReason(value: unknown, reason: string): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "reason" in value &&
+    (value as { reason?: unknown }).reason === reason
+  );
+}
+
+export function describeMissingFilterScope(account: string): string {
+  return [
+    `Gmail account "${account}" was authorized before Octomail requested filter access.`,
+    `Run:\n  npm run auth -- --account ${account}\n`,
+    "and approve the new permission. Label, search, and draft tools keep working meanwhile.",
+  ].join(" ");
 }
