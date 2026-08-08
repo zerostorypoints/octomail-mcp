@@ -238,8 +238,13 @@ export function isScopeInsufficientError(error: unknown): boolean {
     return true;
   }
 
+  // Gmail returns the "insufficientPermissions" reason for genuine
+  // resource-permission denials too, not only missing OAuth scopes — pair it
+  // with the 403 status the way the message branch above does, so a
+  // resource-permission failure isn't misreported as fixable by re-running
+  // npm run auth.
   const errors = gmailError?.errors;
-  if (Array.isArray(errors) && errors.some((entry) => isRecordWithReason(entry, "insufficientPermissions"))) {
+  if (status === 403 && Array.isArray(errors) && errors.some((entry) => isRecordWithReason(entry, "insufficientPermissions"))) {
     return true;
   }
 

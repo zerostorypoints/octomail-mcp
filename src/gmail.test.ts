@@ -131,6 +131,25 @@ test("isScopeInsufficientError detects insufficientPermissions in error.errors",
   );
 });
 
+test("isScopeInsufficientError does not match a non-403 insufficientPermissions — a genuine resource-permission denial, not a scope problem", () => {
+  assert.equal(
+    isScopeInsufficientError({
+      message: "Request failed with status code 404",
+      response: {
+        status: 404,
+        data: {
+          error: {
+            code: 404,
+            message: "Requested entity was not found.",
+            errors: [{ reason: "insufficientPermissions" }],
+          },
+        },
+      },
+    }),
+    false,
+  );
+});
+
 test("isScopeInsufficientError does not match an unrelated plain 403", () => {
   assert.equal(
     isScopeInsufficientError({

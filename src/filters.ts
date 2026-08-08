@@ -248,6 +248,9 @@ export function registerFilterTools(server: McpServer): void {
 
           const addLabelIds = filter.action?.addLabelIds ?? [];
           const removeLabelIds = filter.action?.removeLabelIds ?? [];
+          // TRASH/SPAM are stable, non-localizable IDs (see the guard call
+          // below), so checking the IDs directly is enough here too.
+          const addsTrashOrSpam = addLabelIds.includes("TRASH") || addLabelIds.includes("SPAM");
 
           if (!addLabelIds.length && !removeLabelIds.length) {
             throw new Error(`Filter ${filterId} has no label actions to apply. Nothing to backfill.`);
@@ -309,13 +312,19 @@ export function registerFilterTools(server: McpServer): void {
             addLabels: described.addLabels,
             removeLabels: described.removeLabels,
             modified: ids.length,
-            ...(nextPageToken ? { nextPageToken } : {}),
             // nextPageToken is the API's own "more results exist" signal. A
             // count comparison would lie whenever Gmail returns fewer messages
-            // than requested for reasons of its own.
-            message: nextPageToken
-              ? `Modified ${ids.length}; more matching messages remain. Run again with pageToken: "${nextPageToken}" to continue through the backlog.`
-              : "Backfill complete — no matching messages remain.",
+            // than requested for reasons of its own. But when this filter adds
+            // TRASH or SPAM, the messages just modified drop out of the
+            // default search result set this query runs against — the
+            // token's offset no longer points where the caller expects, and
+            // paging with it risks skipping messages.
+            ...(nextPageToken && !addsTrashOrSpam ? { nextPageToken } : {}),
+            message: !nextPageToken
+              ? "Backfill complete — no matching messages remain."
+              : addsTrashOrSpam
+                ? `Modified ${ids.length}. This filter adds TRASH or SPAM, so the messages just modified no longer match this query — re-run gmail_backfill_filter with no pageToken (not the one from this response) to pick up any remaining matches.`
+                : `Modified ${ids.length}; more matching messages remain. Run again with pageToken: "${nextPageToken}" to continue through the backlog.`,
           };
         });
       }, account),

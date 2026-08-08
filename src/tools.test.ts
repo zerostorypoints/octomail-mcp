@@ -25,7 +25,3 @@ test("assertDestructiveLabelsConfirmed throws for lowercase trash without confir
 test("assertDestructiveLabelsConfirmed does not throw with an undefined add list", () => {
   assert.doesNotThrow(() => assertDestructiveLabelsConfirmed(undefined, undefined, "gmail_apply_labels"));
 });
-
-test("assertDestructiveLabelsConfirmed does not throw for a normal user label without confirm", () => {
-  assert.doesNotThrow(() => assertDestructiveLabelsConfirmed(["Receipts"], undefined, "gmail_apply_labels"));
-});

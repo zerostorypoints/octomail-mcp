@@ -17,7 +17,7 @@ export async function safeTool(fn: () => Promise<unknown>, account?: string) {
 
 // Adding either of these destroys mail: Gmail purges trashed and spammed
 // messages after 30 days. Removing them is a recovery action and is not gated.
-export const DESTRUCTIVE_LABELS = ["TRASH", "SPAM"];
+export const DESTRUCTIVE_LABELS: readonly string[] = ["TRASH", "SPAM"];
 
 export function assertDestructiveLabelsConfirmed(
   addLabelNames: string[] | undefined,
