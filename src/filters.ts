@@ -11,7 +11,7 @@ import {
   summarizeMessage,
   tokenHasScope,
 } from "./gmail.js";
-import { accountShape, safeTool } from "./tools.js";
+import { accountShape, assertDestructiveLabelsConfirmed, safeTool } from "./tools.js";
 
 export type FilterCriteria = {
   from?: string | null;
@@ -131,7 +131,7 @@ export function registerFilterTools(server: McpServer): void {
 
   server.tool(
     "gmail_create_filter",
-    "Create a Gmail filter. Filters only affect mail that arrives after they are created — use gmail_backfill_filter for existing mail. Gmail allows at most one user-defined label per filter.",
+    "Create a Gmail filter. Filters only affect mail that arrives after they are created — use gmail_backfill_filter for existing mail. Gmail allows at most one user-defined label per filter. Adding TRASH or SPAM installs a standing rule that destroys future matching mail after Gmail's 30-day purge, so that requires confirm: true; removing them does not.",
     {
       ...accountShape,
       from: z.string().min(1).optional(),
@@ -146,9 +146,11 @@ export function registerFilterTools(server: McpServer): void {
       addLabelNames: z.array(z.string().min(1)).optional(),
       removeLabelNames: z.array(z.string().min(1)).optional().describe('Use "INBOX" to skip the inbox, "SPAM" to never mark as spam.'),
       forward: z.string().min(1).optional().describe("Must already be a verified forwarding address on this account."),
+      confirm: z.boolean().optional().describe("Required, and must be true, when addLabelNames includes TRASH or SPAM."),
     },
-    async ({ account, addLabelNames, removeLabelNames, forward, ...criteria }) =>
+    async ({ account, addLabelNames, removeLabelNames, forward, confirm, ...criteria }) =>
       safeTool(async () => {
+        assertDestructiveLabelsConfirmed(addLabelNames, confirm, "gmail_create_filter");
         const gmail = await gmailWithFilterScope(account);
 
         if (!criteriaToQuery(criteria).trim()) {
@@ -219,7 +221,7 @@ export function registerFilterTools(server: McpServer): void {
 
   server.tool(
     "gmail_backfill_filter",
-    "Apply an existing filter's labels to mail already in the mailbox. Dry run by default: reports what would change and modifies nothing until apply is true. The filter's forward action is deliberately ignored.",
+    "Apply an existing filter's labels to mail already in the mailbox. Dry run by default: reports what would change and modifies nothing until apply is true. The filter's forward action is deliberately ignored. If the filter adds TRASH or SPAM, applying it destroys mail after Gmail's 30-day purge, so apply: true additionally requires confirm: true — the dry run itself is never gated.",
     {
       ...accountShape,
       filterId: z.string().min(1),
@@ -228,8 +230,9 @@ export function registerFilterTools(server: McpServer): void {
       // silently return fewer messages than the caller asked for.
       maxResults: z.number().int().min(1).max(500).optional().default(500),
       pageToken: z.string().optional().describe("nextPageToken from a previous gmail_backfill_filter call, to continue through the backlog."),
+      confirm: z.boolean().optional().describe("Required, and must be true, when apply is true and the filter adds TRASH or SPAM."),
     },
-    async ({ account, filterId, apply, maxResults, pageToken }) =>
+    async ({ account, filterId, apply, maxResults, pageToken, confirm }) =>
       safeTool(async () => {
         const gmail = await gmailWithFilterScope(account);
         return await withScopeErrors(account, async () => {
@@ -248,6 +251,13 @@ export function registerFilterTools(server: McpServer): void {
 
           if (!addLabelIds.length && !removeLabelIds.length) {
             throw new Error(`Filter ${filterId} has no label actions to apply. Nothing to backfill.`);
+          }
+
+          if (apply) {
+            const labels = (await gmail.users.labels.list({ userId: "me" })).data.labels ?? [];
+            const names = labelNamesById(labels);
+            const addLabelNames = addLabelIds.map((id) => names.get(id) ?? id);
+            assertDestructiveLabelsConfirmed(addLabelNames, confirm, "gmail_backfill_filter");
           }
 
           const list = await gmail.users.messages.list({ userId: "me", q: query, maxResults, pageToken });

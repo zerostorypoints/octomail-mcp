@@ -3,7 +3,7 @@ import type { gmail_v1 } from "googleapis";
 import { z } from "zod";
 import { filtersReferencingLabel } from "./filters.js";
 import { FILTER_SCOPE, gmailForAccount, isScopeInsufficientError, readAccountToken, resolveLabelNames, tokenHasScope } from "./gmail.js";
-import { accountShape, safeTool } from "./tools.js";
+import { accountShape, assertDestructiveLabelsConfirmed, safeTool } from "./tools.js";
 
 // Gmail rejects any colour outside this predefined palette. Verified complete
 // against the reference on 2026-08-07 (102 values). Source:
@@ -83,15 +83,17 @@ export function registerLabelTools(server: McpServer): void {
 
   server.tool(
     "gmail_apply_labels",
-    "Add and/or remove labels on Gmail messages. Label names may also be Gmail label IDs.",
+    "Add and/or remove labels on Gmail messages. Label names may also be Gmail label IDs. Adding TRASH or SPAM destroys mail after Gmail's 30-day purge, so that requires confirm: true; removing them does not.",
     {
       ...accountShape,
       messageIds: z.array(z.string().min(1)).min(1),
       addLabelNames: z.array(z.string().min(1)).optional(),
       removeLabelNames: z.array(z.string().min(1)).optional(),
+      confirm: z.boolean().optional().describe("Required, and must be true, when addLabelNames includes TRASH or SPAM."),
     },
-    async ({ account, messageIds, addLabelNames, removeLabelNames }) =>
+    async ({ account, messageIds, addLabelNames, removeLabelNames, confirm }) =>
       safeTool(async () => {
+        assertDestructiveLabelsConfirmed(addLabelNames, confirm, "gmail_apply_labels");
         const gmail = await gmailForAccount(account);
         const addLabelIds = await resolveLabelNames(gmail, addLabelNames);
         const removeLabelIds = await resolveLabelNames(gmail, removeLabelNames);

@@ -11,11 +11,18 @@ This MCP server talks to the Gmail API on your behalf using these OAuth scopes:
 | `gmail.compose` | Create drafts |
 | `gmail.settings.basic` | List, create, and delete filters |
 
-There is deliberately **no tool that sends mail, trashes, or deletes a
-message**. Nothing in this server can remove mail. It can delete two kinds of
-metadata — labels and filters — and each requires an explicit `confirm: true`;
-without it the tool returns an impact report and changes nothing. Deleting a
-label leaves its messages intact and removes only their categorisation.
+There is deliberately **no tool that sends mail or deletes a message**. But
+`TRASH` and `SPAM` are ordinary Gmail labels, and adding either one — via
+`gmail_apply_labels`, as a standing rule via `gmail_create_filter`, or applied
+to existing mail via `gmail_backfill_filter` — does trash or spam the message,
+and Gmail purges trashed and spammed mail after 30 days. Adding `TRASH` or
+`SPAM` is therefore the one label pair that requires an explicit
+`confirm: true`; without it the call is refused and nothing changes. Removing
+them is a recovery action and is not gated. The server can also delete two
+kinds of metadata — labels and filters — and each of those likewise requires
+an explicit `confirm: true`; without it the tool returns an impact report and
+changes nothing. Deleting a label leaves its messages intact and removes only
+their categorisation.
 
 One capability does let mail leave an account: `gmail_create_filter` accepts an
 optional `forward` action, which installs a standing Gmail forwarding rule.

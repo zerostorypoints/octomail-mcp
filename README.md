@@ -13,13 +13,20 @@ message, and `gmail_create_draft` only ever creates a draft. The one way mail
 can leave an account is `gmail_create_filter`'s optional `forward` action,
 which installs a standing Gmail rule — and Gmail only accepts an address you
 have already verified on that account, which this server has no scope to do
-for you. No tool touches whether a message exists: nothing sends it, deletes
-it, or trashes it. The most destructive actions available are deleting a
-label or a filter, and both require an explicit `confirm: true` — without it
-they return an impact report and change nothing. Deleting a label does not
-delete the messages that carried it, only their categorisation. OAuth tokens
-are stored locally at file mode `0600`. See [SECURITY.md](SECURITY.md) for
-the full policy and how to report a vulnerability.
+for you. No tool ever deletes a message outright, but `TRASH` and `SPAM` are
+ordinary Gmail labels, and adding either one to a message — directly via
+`gmail_apply_labels`, as a standing rule via `gmail_create_filter`, or applied
+to existing mail via `gmail_backfill_filter` — does trash or spam it, and
+Gmail purges trashed and spammed mail after 30 days. That is the one label
+pair this server gates: adding `TRASH` or `SPAM` requires an explicit
+`confirm: true`, and without it the call is refused and nothing changes;
+removing them is a recovery action and is never gated. The other most
+destructive actions available are deleting a label or a filter, which also
+require an explicit `confirm: true` — without it they return an impact report
+and change nothing. Deleting a label does not delete the messages that
+carried it, only their categorisation. OAuth tokens are stored locally at
+file mode `0600`. See [SECURITY.md](SECURITY.md) for the full policy and how
+to report a vulnerability.
 
 ## Requirements
 

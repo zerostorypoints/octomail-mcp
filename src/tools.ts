@@ -14,3 +14,23 @@ export async function safeTool(fn: () => Promise<unknown>, account?: string) {
     });
   }
 }
+
+// Adding either of these destroys mail: Gmail purges trashed and spammed
+// messages after 30 days. Removing them is a recovery action and is not gated.
+export const DESTRUCTIVE_LABELS = ["TRASH", "SPAM"];
+
+export function assertDestructiveLabelsConfirmed(
+  addLabelNames: string[] | undefined,
+  confirm: boolean | undefined,
+  action: string,
+): void {
+  const destructive = (addLabelNames ?? []).filter((name) =>
+    DESTRUCTIVE_LABELS.includes(name.toUpperCase()),
+  );
+
+  if (destructive.length && !confirm) {
+    throw new Error(
+      `${action} would add ${destructive.join(" and ")}, which destroys mail — Gmail purges those messages after 30 days. Nothing was changed. Call again with confirm: true if that is what you intend.`,
+    );
+  }
+}
