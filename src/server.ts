@@ -3,16 +3,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadAccountsConfig } from "./config.js";
-import { describeAccountError, encodeMimeMessage, gmailForAccount, messageHeader, resolveLabelNames, summarizeMessage, textResult } from "./gmail.js";
+import { describeAccountError, encodeMimeMessage, gmailForAccount, messageHeader, resolveLabelNames, summarizeMessage } from "./gmail.js";
+import { accountShape, safeTool } from "./tools.js";
 
 const server = new McpServer({
   name: "octomail",
   version: "0.1.0",
 });
-
-const accountShape = {
-  account: z.string().min(1).describe("Configured Gmail account alias, e.g. work, personal, support."),
-};
 
 async function searchAccount(account: string, query: string, maxResults: number) {
   const gmail = await gmailForAccount(account);
@@ -39,16 +36,6 @@ async function searchAccount(account: string, query: string, maxResults: number)
     resultSizeEstimate: list.data.resultSizeEstimate,
     messages,
   };
-}
-
-async function safeTool(fn: () => Promise<unknown>, account?: string) {
-  try {
-    return textResult(await fn());
-  } catch (error) {
-    return textResult({
-      error: account ? describeAccountError(account, error) : error instanceof Error ? error.message : String(error),
-    });
-  }
 }
 
 server.tool(
