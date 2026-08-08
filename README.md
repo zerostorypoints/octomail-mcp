@@ -74,6 +74,7 @@ config blocks you paste into your MCP client.
 | [docs/accounts.md](docs/accounts.md) | Aliases, `accounts.json`, adding/removing accounts, checking account health |
 | [docs/clients.md](docs/clients.md) | Wiring the server into Claude Code, Claude Desktop, and Codex |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Fixes for common authorization and config errors |
+| [docs/filter-playbook.md](docs/filter-playbook.md) | Field-tested workflow and lessons for cleaning up a mailbox with filters, backfills, and verification |
 
 ## Commands
 
