@@ -8,9 +8,12 @@ authorizes and stores its credentials independently.
 
 ## Safety
 
-The tool list below deliberately excludes send — there is no way to mail
-anything out through this server; `gmail_create_draft` only ever creates a
-draft. No tool touches whether a message exists: nothing sends it, deletes
+The tool list below deliberately excludes send: no tool composes and sends a
+message, and `gmail_create_draft` only ever creates a draft. The one way mail
+can leave an account is `gmail_create_filter`'s optional `forward` action,
+which installs a standing Gmail rule — and Gmail only accepts an address you
+have already verified on that account, which this server has no scope to do
+for you. No tool touches whether a message exists: nothing sends it, deletes
 it, or trashes it. The most destructive actions available are deleting a
 label or a filter, and both require an explicit `confirm: true` — without it
 they return an impact report and change nothing. Deleting a label does not

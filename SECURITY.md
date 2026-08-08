@@ -9,10 +9,19 @@ This MCP server talks to the Gmail API on your behalf using these OAuth scopes:
 | `gmail.readonly` | Search, read messages and threads, list labels |
 | `gmail.modify` | Apply and remove labels, archive messages |
 | `gmail.compose` | Create drafts |
+| `gmail.settings.basic` | List, create, and delete filters |
 
-There is deliberately **no tool that sends mail, trashes, or deletes anything**.
-The most destructive action available is removing the `INBOX` label from a
-message, which archives it. Nothing is ever permanently removed.
+There is deliberately **no tool that sends mail, trashes, or deletes a
+message**. Nothing in this server can remove mail. It can delete two kinds of
+metadata — labels and filters — and each requires an explicit `confirm: true`;
+without it the tool returns an impact report and changes nothing. Deleting a
+label leaves its messages intact and removes only their categorisation.
+
+One capability does let mail leave an account: `gmail_create_filter` accepts an
+optional `forward` action, which installs a standing Gmail forwarding rule.
+Gmail only accepts a forwarding address already verified on that account, and
+this server does not request `gmail.settings.sharing`, so it cannot verify a
+new destination for you.
 
 ## Where your credentials live
 
