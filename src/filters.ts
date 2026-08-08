@@ -227,8 +227,9 @@ export function registerFilterTools(server: McpServer): void {
       // Gmail's messages.list caps maxResults at 500; a higher cap here would
       // silently return fewer messages than the caller asked for.
       maxResults: z.number().int().min(1).max(500).optional().default(500),
+      pageToken: z.string().optional().describe("nextPageToken from a previous gmail_backfill_filter call, to continue through the backlog."),
     },
-    async ({ account, filterId, apply, maxResults }) =>
+    async ({ account, filterId, apply, maxResults, pageToken }) =>
       safeTool(async () => {
         const gmail = await gmailWithFilterScope(account);
         return await withScopeErrors(account, async () => {
@@ -249,9 +250,10 @@ export function registerFilterTools(server: McpServer): void {
             throw new Error(`Filter ${filterId} has no label actions to apply. Nothing to backfill.`);
           }
 
-          const list = await gmail.users.messages.list({ userId: "me", q: query, maxResults });
+          const list = await gmail.users.messages.list({ userId: "me", q: query, maxResults, pageToken });
           const ids = (list.data.messages ?? []).map((message) => message.id).filter((id): id is string => Boolean(id));
           const [described] = await describeFilters(gmail, [filter]);
+          const nextPageToken = list.data.nextPageToken ?? undefined;
 
           if (!apply) {
             const sample = await Promise.all(
@@ -274,8 +276,10 @@ export function registerFilterTools(server: McpServer): void {
               matchedEstimate: list.data.resultSizeEstimate,
               wouldModify: ids.length,
               sample,
-              message:
-                "Nothing was modified. This query approximates Gmail's filter matching — check the sample, then call again with apply: true.",
+              ...(nextPageToken ? { nextPageToken } : {}),
+              message: nextPageToken
+                ? `Nothing was modified. This query approximates Gmail's filter matching — check the sample, then call again with apply: true. This page covers ${ids.length} message(s); more match beyond this page — pass pageToken: "${nextPageToken}" to preview further pages.`
+                : "Nothing was modified. This query approximates Gmail's filter matching — check the sample, then call again with apply: true. This is the last page of matches.",
             };
           }
 
@@ -292,11 +296,12 @@ export function registerFilterTools(server: McpServer): void {
             addLabels: described.addLabels,
             removeLabels: described.removeLabels,
             modified: ids.length,
+            ...(nextPageToken ? { nextPageToken } : {}),
             // nextPageToken is the API's own "more results exist" signal. A
             // count comparison would lie whenever Gmail returns fewer messages
             // than requested for reasons of its own.
-            message: list.data.nextPageToken
-              ? `Modified ${ids.length}; more matching messages remain. Run again to continue through the backlog.`
+            message: nextPageToken
+              ? `Modified ${ids.length}; more matching messages remain. Run again with pageToken: "${nextPageToken}" to continue through the backlog.`
               : "Backfill complete — no matching messages remain.",
           };
         });
