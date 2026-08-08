@@ -224,7 +224,9 @@ export function registerFilterTools(server: McpServer): void {
       ...accountShape,
       filterId: z.string().min(1),
       apply: z.boolean().optional().default(false).describe("True actually modifies messages."),
-      maxResults: z.number().int().min(1).max(1000).optional().default(500),
+      // Gmail's messages.list caps maxResults at 500; a higher cap here would
+      // silently return fewer messages than the caller asked for.
+      maxResults: z.number().int().min(1).max(500).optional().default(500),
     },
     async ({ account, filterId, apply, maxResults }) =>
       safeTool(async () => {
@@ -290,10 +292,12 @@ export function registerFilterTools(server: McpServer): void {
             addLabels: described.addLabels,
             removeLabels: described.removeLabels,
             modified: ids.length,
-            message:
-              ids.length === maxResults
-                ? `Hit the ${maxResults}-message cap. Run again to continue through the backlog.`
-                : "Backfill complete.",
+            // nextPageToken is the API's own "more results exist" signal. A
+            // count comparison would lie whenever Gmail returns fewer messages
+            // than requested for reasons of its own.
+            message: list.data.nextPageToken
+              ? `Modified ${ids.length}; more matching messages remain. Run again to continue through the backlog.`
+              : "Backfill complete — no matching messages remain.",
           };
         });
       }, account),
