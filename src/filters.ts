@@ -23,8 +23,10 @@ export function criteriaToQuery(criteria: FilterCriteria): string {
   if (criteria.subject) parts.push(`subject:(${criteria.subject})`);
   if (criteria.hasAttachment) parts.push("has:attachment");
   if (criteria.excludeChats) parts.push("-in:chats");
-  if (criteria.size && criteria.sizeComparison === "larger") parts.push(`larger:${criteria.size}b`);
-  if (criteria.size && criteria.sizeComparison === "smaller") parts.push(`smaller:${criteria.size}b`);
+  // `!= null` rather than truthiness: size 0 is a legitimate stored value, and
+  // dropping it turns "smaller:0b" (matches nothing) into no constraint at all.
+  if (criteria.size != null && criteria.sizeComparison === "larger") parts.push(`larger:${criteria.size}b`);
+  if (criteria.size != null && criteria.sizeComparison === "smaller") parts.push(`smaller:${criteria.size}b`);
   if (criteria.query) parts.push(criteria.query);
   if (criteria.negatedQuery) parts.push(`-(${criteria.negatedQuery})`);
 

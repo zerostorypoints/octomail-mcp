@@ -32,6 +32,11 @@ test("criteriaToQuery ignores size when the comparison is unspecified", () => {
   assert.equal(criteriaToQuery({ size: 500 }), "");
 });
 
+test("criteriaToQuery keeps a zero size, which truthiness would drop", () => {
+  assert.equal(criteriaToQuery({ size: 0, sizeComparison: "smaller" }), "smaller:0b");
+  assert.equal(criteriaToQuery({ size: 0, sizeComparison: "larger" }), "larger:0b");
+});
+
 test("criteriaToQuery passes query through and negates negatedQuery", () => {
   assert.equal(criteriaToQuery({ query: "is:unread" }), "is:unread");
   assert.equal(criteriaToQuery({ negatedQuery: "from:boss@example.com" }), "-(from:boss@example.com)");
