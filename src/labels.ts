@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { gmail_v1 } from "googleapis";
 import { z } from "zod";
 import { filtersReferencingLabel } from "./filters.js";
-import { gmailForAccount, isScopeInsufficientError, resolveLabelNames } from "./gmail.js";
+import { FILTER_SCOPE, gmailForAccount, isScopeInsufficientError, readAccountToken, resolveLabelNames, tokenHasScope } from "./gmail.js";
 import { accountShape, safeTool } from "./tools.js";
 
 // Gmail rejects any colour outside this predefined palette. Verified complete
@@ -229,19 +229,29 @@ export function registerLabelTools(server: McpServer): void {
         const children = descendantsOf(target.name ?? "", all.map((entry) => entry.name ?? ""));
 
         // A filter pointing at a deleted label is silently broken, and the
-        // Gmail UI never warns about it. A missing filter scope is expected —
-        // label deletion does not need it — so degrade quietly there. Any other
-        // failure must NOT masquerade as "no filters reference this label",
-        // because this report is what the user confirms an irreversible delete
-        // against.
+        // Gmail UI never warns about it. This report is what the user confirms
+        // an irreversible delete against, so an empty referencingFilters must
+        // never be presented as "checked, found none" when the check could not
+        // actually run — either because the token lacks the filter scope, or
+        // because the API call itself failed with a scope error. Both are
+        // recorded in filterCheckSkipped rather than staying silent. Any other
+        // failure keeps the existing filterCheckWarning behaviour.
         let referencingFilters: string[] = [];
         let filterCheckWarning: string | undefined;
-        try {
-          const found = await filtersReferencingLabel(gmail, target.id as string);
-          referencingFilters = found.map((entry) => entry.id ?? "(unknown)");
-        } catch (error) {
-          if (!isScopeInsufficientError(error)) {
-            filterCheckWarning = `Could not check which filters reference this label: ${error instanceof Error ? error.message : String(error)}`;
+        let filterCheckSkipped: string | undefined;
+
+        if (tokenHasScope(readAccountToken(account), FILTER_SCOPE) === false) {
+          filterCheckSkipped = `Could not check which filters reference this label — account "${account}" has no filter scope. Run: npm run auth -- --account ${account}`;
+        } else {
+          try {
+            const found = await filtersReferencingLabel(gmail, target.id as string);
+            referencingFilters = found.map((entry) => entry.id ?? "(unknown)");
+          } catch (error) {
+            if (isScopeInsufficientError(error)) {
+              filterCheckSkipped = `Could not check which filters reference this label — account "${account}" has no filter scope. Run: npm run auth -- --account ${account}`;
+            } else {
+              filterCheckWarning = `Could not check which filters reference this label: ${error instanceof Error ? error.message : String(error)}`;
+            }
           }
         }
 
@@ -253,6 +263,7 @@ export function registerLabelTools(server: McpServer): void {
             orphanedDescendants: children,
             referencingFilters,
             ...(filterCheckWarning ? { filterCheckWarning } : {}),
+            ...(filterCheckSkipped ? { filterCheckSkipped } : {}),
             message: "Nothing was deleted. Call again with confirm: true to delete this label.",
           };
         }
@@ -263,6 +274,7 @@ export function registerLabelTools(server: McpServer): void {
           orphanedDescendants: children,
           referencingFilters,
           ...(filterCheckWarning ? { filterCheckWarning } : {}),
+          ...(filterCheckSkipped ? { filterCheckSkipped } : {}),
         };
       }, account),
   );
