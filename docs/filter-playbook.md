@@ -5,9 +5,11 @@ first: ~1000 messages, a dozen machine senders, one filter to start with.
 The second: 48,000 messages, ~70 filters, and seven independent review
 rounds before the filters were provably safe. The third: a shared company
 mailbox — five aliases, one inbox, a Polish-only taxonomy, and again seven
-review rounds converging 4→5→3→1→1→1→0 findings. In all three, an agent did
-the work with a human approving each step. Everything below was learned by
-getting it wrong first, so you don't have to.
+review rounds converging 4→5→3→1→1→1→0 findings. The fourth: a tune-up of a
+mailbox whose owner had already built a working scheme by hand — where every
+defect turned out to live in the incumbent filters (lesson 18). In all four,
+an agent did the work with a human approving each step. Everything below was
+learned by getting it wrong first, so you don't have to.
 
 ## The goal, stated correctly
 
@@ -256,7 +258,35 @@ re-run the source query with the target negated, on both sides of every
 boundary you used, and count returned messages — never the estimate field
 (ours was stuck at 201 for result sets of 11, 13 and 25).
 
-### 18. The payoff is what the noise was hiding
+### 18. The incumbent filters are where the bodies are buried
+
+The fourth mailbox was a tune-up: the owner's own hand-built scheme, years
+old, visibly working. Every single defect the review loop found — thirteen,
+across four rounds — was in the *incumbent* mute filter, not in the new
+work. It archived the e-signature service (twelve of twelve messages were
+contracts awaiting signature), the workspace admin's security alerts, bounce
+notices, a compliance deadline ten days out, and the password resets of the
+platform the owner administers. "It's been working for years" is not
+evidence of safety; it means the failures are already in the archive where
+nobody looks. A tune-up scope ("don't rebuild, just extend") does not exempt
+the existing rules from the lesson-14 audit — it makes that audit the most
+valuable part of the job.
+
+### 19. Hand-moving a message is not a fix
+
+When a review finds a wrongly archived message, restoring it to the inbox
+repairs the *symptom*. If the live filter still matches that message's
+template, the vendor's next re-send is archived again — which is exactly
+what happened to a compliance reminder we had restored by hand one round
+earlier. The fix is done only when the filter's criteria stop matching the
+template, and there is a decisive check for that: take the new filter's
+rendered query, AND it with the protected message's subject terms, and run
+it as a search — the protected id must be absent from the results. Expect
+the carve-out vocabulary to need several iterations against real templates
+(ours shipped at v4); each iteration gets the same decisive check, not a
+fresh promise.
+
+### 20. The payoff is what the noise was hiding
 
 The point of all this was never tidiness. Clearing ~40 machine messages a
 month exposed, in one mailbox: a hosting plan at 300% of quota, a mandatory
