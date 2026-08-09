@@ -1,10 +1,12 @@
 # A Gmail filter playbook
 
-Lessons from cleaning up two real, years-old mailboxes with Octomail. The
+Lessons from cleaning up three real, years-old mailboxes with Octomail. The
 first: ~1000 messages, a dozen machine senders, one filter to start with.
 The second: 48,000 messages, ~70 filters, and seven independent review
-rounds before the filters were provably safe. In both, an agent did the
-work with a human approving each step. Everything below was learned by
+rounds before the filters were provably safe. The third: a shared company
+mailbox — five aliases, one inbox, a Polish-only taxonomy, and again seven
+review rounds converging 4→5→3→1→1→1→0 findings. In all three, an agent did
+the work with a human approving each step. Everything below was learned by
 getting it wrong first, so you don't have to.
 
 ## The goal, stated correctly
@@ -203,7 +205,58 @@ subdomain, unless you have positively enumerated every local-part on it —
 and when auditing, search the domain under its bulk label and read the
 distinct senders that actually got caught.
 
-### 14. The payoff is what the noise was hiding
+### 14. Every archiving sender is an auth sender until proven otherwise
+
+The dominant defect class of our third cleanup — seven of fifteen findings
+across seven review rounds — was one pattern: a sender filtered as "cost
+receipts" or "social noise" that *also* sends authentication or
+account-critical mail. Adobe's receipt address also sends verification
+codes. A job board's notification address also sends account activations.
+An invoicing platform sends password resets and refund notices between the
+proformas. One vendor's *entire* corpus turned out to be sign-in codes —
+filtered straight to the archive with a forward attached. LinkedIn,
+Instagram and TikTok each hide a security sender inside their notification
+domains. Lesson 4 said carve out auth mail where you *know* it mixes; the
+stronger rule is: before any filter removes INBOX, positively probe that
+sender's history for auth and account-critical templates (codes, resets,
+"action required", past-due, suspensions) and write the carve-out first.
+Assume the mix; make the sender prove it's pure.
+
+### 15. Backfill labels your sent mail too
+
+Live filters only see incoming mail; a backfill that replays criteria as a
+search query sees *everything* — including SENT. Gmail's `to:` operator
+also matches Cc, so a recipient-based rule sweeps up your own replies
+whenever someone self-CCs. Two of our "invoice" labels quietly acquired
+sent test messages and self-copies this way. After every alias- or
+recipient-based backfill, run `in:sent label:<target>` and adjudicate the
+hits — and remember the check detects only over-labeling; run the negation
+(`<query> -label:<target>`) for the misses.
+
+### 16. One relay address, many issuers
+
+Invoicing platforms send many customers' documents from a single relay
+address. Ours (`no-reply@poczta.wfirma.pl`) carried a hosting vendor's cost
+invoices *and* a former contractor's — same `from:`, opposite categories.
+The From display name and body, not the address, identify the real issuer.
+Before filtering any e-invoicing relay, enumerate the issuers behind it and
+accept that the filter's category is only as pure as that list; record the
+impure case as a watch item.
+
+### 17. Clean both sides of every partition
+
+Every sweep in this work splits the mailbox in two — in inbox or archived,
+before a date or after, labeled or not — and a cleanup scoped to one side
+silently claims completeness for both. Our star cleanup ran `is:starred
+-in:inbox`, declared victory, and left 266 machine stars sitting *in* the
+inbox; a "full history" backfill dropped a contiguous four-month window
+mid-range and no boundary check could see it. After any bulk operation,
+verify with a query that covers the *complement* of what you touched:
+re-run the source query with the target negated, on both sides of every
+boundary you used, and count returned messages — never the estimate field
+(ours was stuck at 201 for result sets of 11, 13 and 25).
+
+### 18. The payoff is what the noise was hiding
 
 The point of all this was never tidiness. Clearing ~40 machine messages a
 month exposed, in one mailbox: a hosting plan at 300% of quota, a mandatory
