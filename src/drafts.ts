@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { gmail_v1 } from "googleapis";
 import { z } from "zod";
 import { attachmentSpecSchema, loadOutboundAttachments, type AttachmentSpec } from "./attachments.js";
-import { gmailForAccount, messageHeader, summarizeMessage } from "./gmail.js";
+import { describeAccountError, gmailForAccount, messageHeader, summarizeMessage } from "./gmail.js";
 import { buildMimeMessage } from "./mime.js";
 import { accountShape, safeTool } from "./tools.js";
 
@@ -22,16 +22,28 @@ type ComposeInput = {
   cc?: string;
   bcc?: string;
   replyToMessageId?: string;
+  inReplyTo?: string;
+  references?: string;
   attachments?: AttachmentSpec[];
 };
+
+// RFC 5322 section 3.6.4: References is the prior chain with the parent's
+// Message-ID appended, space-separated, oldest first. Absent both inputs, the
+// header must be omitted entirely rather than emitted empty.
+export function buildReferences(
+  priorReferences: string | undefined,
+  parentMessageId: string | undefined,
+): string | undefined {
+  return [priorReferences, parentMessageId].filter(Boolean).join(" ") || undefined;
+}
 
 async function composeRaw(
   gmail: gmail_v1.Gmail,
   input: ComposeInput,
 ): Promise<{ raw: string; threadId?: string }> {
   let threadId: string | undefined;
-  let inReplyTo: string | undefined;
-  let references: string | undefined;
+  let inReplyTo = input.inReplyTo;
+  let references = input.references;
 
   if (input.replyToMessageId) {
     const replyTo = await gmail.users.messages.get({
@@ -42,8 +54,7 @@ async function composeRaw(
     });
     threadId = replyTo.data.threadId ?? undefined;
     inReplyTo = messageHeader(replyTo.data, "Message-ID");
-    const priorReferences = messageHeader(replyTo.data, "References");
-    references = [priorReferences, inReplyTo].filter(Boolean).join(" ") || undefined;
+    references = buildReferences(messageHeader(replyTo.data, "References"), inReplyTo);
   }
 
   const attachments = await loadOutboundAttachments(gmail, input.attachments);
@@ -98,7 +109,7 @@ export function registerDraftTools(server: McpServer): void {
         const gmail = await gmailForAccount(account);
         const list = await gmail.users.drafts.list({ userId: "me", maxResults });
 
-        const drafts = await Promise.all(
+        const settled = await Promise.allSettled(
           (list.data.drafts ?? []).map(async (draft) => {
             const detail = await gmail.users.drafts.get({
               userId: "me",
@@ -107,6 +118,14 @@ export function registerDraftTools(server: McpServer): void {
             });
             return { draftId: detail.data.id, message: summarizeMessage(detail.data.message ?? {}) };
           }),
+        );
+
+        // A single rate-limited or failed fetch must not discard every draft
+        // that fetched successfully — report the failure per-draft instead.
+        const drafts = settled.map((result, index) =>
+          result.status === "fulfilled"
+            ? result.value
+            : { draftId: list.data.drafts?.[index]?.id, error: describeAccountError(account, result.reason) },
         );
 
         return { resultSizeEstimate: list.data.resultSizeEstimate, drafts };
@@ -133,13 +152,23 @@ export function registerDraftTools(server: McpServer): void {
       safeTool(async () => {
         const gmail = await gmailForAccount(account);
         const existing = await gmail.users.drafts.get({ userId: "me", id: draftId, format: "metadata" });
-        const { raw } = await composeRaw(gmail, input);
+        const existingMessage = existing.data.message ?? {};
+
+        // Gmail has no partial update: the whole message is rebuilt, so the
+        // In-Reply-To/References headers of a reply-draft must be carried
+        // over explicitly here or the rebuilt message loses threading in
+        // every mail client that isn't Gmail itself.
+        const { raw } = await composeRaw(gmail, {
+          ...input,
+          inReplyTo: messageHeader(existingMessage, "In-Reply-To"),
+          references: messageHeader(existingMessage, "References"),
+        });
 
         const draft = await gmail.users.drafts.update({
           userId: "me",
           id: draftId,
           requestBody: {
-            message: { raw, threadId: existing.data.message?.threadId ?? undefined },
+            message: { raw, threadId: existingMessage.threadId ?? undefined },
           },
         });
 
@@ -150,11 +179,15 @@ export function registerDraftTools(server: McpServer): void {
   server.tool(
     "gmail_delete_draft",
     "Permanently delete a Gmail draft. Requires confirm: true — a deleted draft does not go to Trash and cannot be recovered.",
-    { ...accountShape, draftId: z.string().min(1), confirm: z.boolean().optional() },
+    { ...accountShape, draftId: z.string().min(1), confirm: z.boolean().optional().describe("Must be true to actually delete.") },
     async ({ account, draftId, confirm }) =>
       safeTool(async () => {
         const gmail = await gmailForAccount(account);
-        const draft = await gmail.users.drafts.get({ userId: "me", id: draftId, format: "metadata" });
+        // "full" is required, not "metadata": metadata format never populates
+        // the MIME parts tree, so summarizeMessage's attachments would always
+        // be undefined — and this report is the only warning a permanent
+        // delete gets before it happens.
+        const draft = await gmail.users.drafts.get({ userId: "me", id: draftId, format: "full" });
         const summary = summarizeMessage(draft.data.message ?? {});
 
         if (!confirm) {
