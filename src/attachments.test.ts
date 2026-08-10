@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { sanitizeAttachmentFilename, uniqueFilePath } from "./attachments.js";
+import { MAX_INLINE_BASE64_BYTES, assertInlineSizeWithinLimit } from "./attachments.js";
 
 test("sanitizeAttachmentFilename keeps an ordinary name", () => {
   assert.equal(sanitizeAttachmentFilename("faktura.pdf", "att-1"), "faktura.pdf");
@@ -50,4 +51,20 @@ test("uniqueFilePath appends a counter rather than overwriting", () => {
 test("uniqueFilePath keeps the extension when a name has none", () => {
   const taken = new Set([path.join("/tmp/d", "README")]);
   assert.equal(uniqueFilePath("/tmp/d", "README", (p) => taken.has(p)), path.join("/tmp/d", "README (2)"));
+});
+
+test("assertInlineSizeWithinLimit accepts a payload exactly at the limit", () => {
+  assert.doesNotThrow(() => assertInlineSizeWithinLimit(MAX_INLINE_BASE64_BYTES));
+});
+
+test("assertInlineSizeWithinLimit rejects a payload one byte over the limit", () => {
+  assert.throws(() => assertInlineSizeWithinLimit(MAX_INLINE_BASE64_BYTES + 1));
+});
+
+test("assertInlineSizeWithinLimit points the caller at file mode", () => {
+  assert.throws(() => assertInlineSizeWithinLimit(MAX_INLINE_BASE64_BYTES + 1), /encoding: "file"/);
+});
+
+test("assertInlineSizeWithinLimit reports the actual size so the caller can judge", () => {
+  assert.throws(() => assertInlineSizeWithinLimit(9_000_000), /9000000/);
 });

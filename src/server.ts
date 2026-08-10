@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { registerAttachmentTools } from "./attachments.js";
 import { loadAccountsConfig } from "./config.js";
 import { registerFilterTools } from "./filters.js";
 import { describeAccountError, encodeMimeMessage, gmailForAccount, messageHeader, summarizeMessage } from "./gmail.js";
@@ -255,6 +256,7 @@ server.tool(
 
 registerLabelTools(server);
 registerFilterTools(server);
+registerAttachmentTools(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
