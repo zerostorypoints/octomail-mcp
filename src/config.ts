@@ -73,6 +73,17 @@ export function defaultTokenPath(alias: string): string {
   return path.join(tokenDir(), `${alias}.json`);
 }
 
+export function downloadRoot(): string {
+  return expandPath(process.env.OCTOMAIL_DOWNLOAD_DIR ?? "~/.octomail/attachments");
+}
+
+export function downloadDir(account: string): string {
+  // Guard the alias before it becomes a path segment: aliases are validated on
+  // config load, but this function is reachable with a caller-supplied string.
+  assertValidAlias(account);
+  return path.join(downloadRoot(), account);
+}
+
 export function assertValidAlias(alias: string): void {
   if (!ALIAS_PATTERN.test(alias)) {
     throw new Error(`Invalid account alias "${alias}". Use letters, digits, underscores or hyphens.`);
