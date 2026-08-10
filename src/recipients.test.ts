@@ -84,10 +84,46 @@ test("checkRecipients returns no verdicts for no addresses, which callers must n
   assert.deepEqual(checkRecipients([], allowlist), []);
 });
 
-test("extractAddresses strips surrounding single quotes and does not swallow them into the token", () => {
-  assert.deepEqual(extractAddresses("'evil@attacker.com'"), ["evil@attacker.com"]);
+test("extractAddresses keeps surrounding single quotes in the token so a decorated address is refused, not silently allowed", () => {
+  const found = extractAddresses("'evil@attacker.com'");
+  assert.deepEqual(found, ["'evil@attacker.com'"]);
+  assert.equal(allowed(found), false);
 });
 
 test("extractAddresses trims a trailing full stop after an address", () => {
   assert.deepEqual(extractAddresses("Reach me at alice@example.com."), ["alice@example.com"]);
+});
+
+test("extractAddresses does not lose an address with an apostrophe adjacent to the @, and it is refused", () => {
+  const found = extractAddresses("evil'@attacker.com");
+  assert.ok(found.length > 0, `expected the address to be extracted, got ${JSON.stringify(found)}`);
+  assert.equal(allowed(found), false);
+});
+
+test("extractAddresses does not lose an address with a brace adjacent to the @, and it is refused", () => {
+  const found = extractAddresses("evil{@attacker.com");
+  assert.ok(found.length > 0, `expected the address to be extracted, got ${JSON.stringify(found)}`);
+  assert.equal(allowed(found), false);
+});
+
+test("extractAddresses does not lose an address with a double quote adjacent to the @, and it is refused", () => {
+  const found = extractAddresses('"evil"@attacker.com');
+  assert.ok(found.length > 0, `expected the address to be extracted, got ${JSON.stringify(found)}`);
+  assert.equal(allowed(found), false);
+});
+
+test("a benign address alongside a decorated hostile one: both are extracted and the send is refused", () => {
+  const found = extractAddresses("allowed@ok.com, evil'@attacker.com");
+  assert.equal(found.length, 2, `expected both addresses, got ${JSON.stringify(found)}`);
+  const verdicts = checkRecipients(found, ["allowed@ok.com"]);
+  assert.equal(verdicts.length, 2);
+  assert.ok(
+    verdicts.some((v) => !v.allowed),
+    "expected the decorated hostile address to be refused",
+  );
+  assert.equal(
+    verdicts.length > 0 && verdicts.every((v) => v.allowed),
+    false,
+    "overall verdict must be refused when any recipient is refused",
+  );
 });
