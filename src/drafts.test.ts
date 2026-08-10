@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildReferences, draftShape } from "./drafts.js";
+import { buildReferences, describeAllowlistRefusal, draftShape } from "./drafts.js";
 
 test("attachment specs accept a download-root path", () => {
   assert.deepEqual(draftShape.attachments.parse([{ path: "faktura.pdf" }]), [{ path: "faktura.pdf" }]);
@@ -38,4 +38,40 @@ test("buildReferences: both inputs absent omits the header rather than emitting 
 
 test("buildReferences: a prior References with no parent Message-ID is returned unchanged", () => {
   assert.equal(buildReferences("<root@example.com> <mid1@example.com>", undefined), "<root@example.com> <mid1@example.com>");
+});
+
+test("the refusal names every failing address", () => {
+  const message = describeAllowlistRefusal("work", [
+    { address: "ok@example.com", allowed: true },
+    { address: "evil@attacker.com", allowed: false, reason: "not on allowedRecipients" },
+    { address: "other@elsewhere.pl", allowed: false, reason: "not on allowedRecipients" },
+  ]);
+  assert.ok(message.includes("evil@attacker.com"));
+  assert.ok(message.includes("other@elsewhere.pl"));
+});
+
+test("the refusal does not name addresses that passed", () => {
+  const message = describeAllowlistRefusal("work", [
+    { address: "ok@example.com", allowed: true },
+    { address: "evil@attacker.com", allowed: false, reason: "not on allowedRecipients" },
+  ]);
+  assert.ok(!message.includes("ok@example.com"));
+});
+
+test("the refusal states that nothing was sent", () => {
+  const message = describeAllowlistRefusal("work", [
+    { address: "evil@attacker.com", allowed: false, reason: "not on allowedRecipients" },
+  ]);
+  assert.match(message, /nothing was sent/i);
+});
+
+test("the refusal offers a pasteable allowedRecipients snippet on its own line", () => {
+  const message = describeAllowlistRefusal("work", [
+    { address: "evil@attacker.com", allowed: false, reason: "not on allowedRecipients" },
+  ]);
+  const snippetLine = message
+    .split("\n")
+    .find((line) => line.includes('"allowedRecipients"'));
+  assert.ok(snippetLine, `no snippet line found in:\n${message}`);
+  assert.ok(snippetLine.includes("evil@attacker.com"));
 });

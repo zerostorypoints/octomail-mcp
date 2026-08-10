@@ -158,6 +158,7 @@ export function summarizeMessage(message: gmail_v1.Schema$Message) {
       from: messageHeader(message, "From"),
       to: messageHeader(message, "To"),
       cc: messageHeader(message, "Cc"),
+      bcc: messageHeader(message, "Bcc"),
       subject: messageHeader(message, "Subject"),
       date: messageHeader(message, "Date"),
       messageId: messageHeader(message, "Message-ID"),

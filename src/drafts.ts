@@ -2,8 +2,10 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { gmail_v1 } from "googleapis";
 import { z } from "zod";
 import { attachmentSpecSchema, loadOutboundAttachments, type AttachmentSpec } from "./attachments.js";
-import { describeAccountError, gmailForAccount, messageHeader, summarizeMessage } from "./gmail.js";
+import { getAccountConfig } from "./config.js";
+import { describeAccountError, gmailForAccount, messageHeader, readAccountToken, summarizeMessage, tokenHasScope } from "./gmail.js";
 import { buildMimeMessage } from "./mime.js";
+import { checkRecipients, extractAddresses, type RecipientVerdict } from "./recipients.js";
 import { accountShape, safeTool } from "./tools.js";
 
 export const draftShape = {
@@ -74,6 +76,25 @@ async function composeRaw(
   };
 }
 
+const COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
+
+export function describeAllowlistRefusal(account: string, verdicts: RecipientVerdict[]): string {
+  const refused = verdicts.filter((verdict) => !verdict.allowed);
+  const snippet = JSON.stringify(refused.map((verdict) => verdict.address));
+
+  return [
+    `Refused to send from "${account}": ${refused.length} recipient(s) are not on that account's allowedRecipients list. Nothing was sent.`,
+    ...refused.map((verdict) => `  ${verdict.address} — ${verdict.reason ?? "not allowed"}`),
+    "",
+    `To permit them, add to the "${account}" entry in accounts.json:`,
+    // On its own line so selecting it does not drag in the surrounding prose,
+    // the same reason describeMissingFilterScope formats the way it does.
+    `"allowedRecipients": ${snippet}`,
+    "",
+    'An "@example.com" entry permits any address at that domain. Subdomains are not included.',
+  ].join("\n");
+}
+
 export function registerDraftTools(server: McpServer): void {
   server.tool(
     "gmail_create_draft",
@@ -93,7 +114,22 @@ export function registerDraftTools(server: McpServer): void {
           requestBody: { message: { raw, threadId } },
         });
 
-        return draft.data;
+        const verdicts = checkRecipients(
+          extractAddresses(input.to, input.cc, input.bcc),
+          getAccountConfig(account).allowedRecipients,
+        );
+        const refused = verdicts.filter((verdict) => !verdict.allowed);
+
+        return {
+          ...draft.data,
+          ...(refused.length
+            ? {
+                warning: `Draft created, but it cannot be sent as addressed: ${refused
+                  .map((verdict) => verdict.address)
+                  .join(", ")} are not on this account's allowedRecipients. Add them to accounts.json before calling gmail_send_draft.`,
+              }
+            : {}),
+        };
       }, account),
   );
 
@@ -204,6 +240,66 @@ export function registerDraftTools(server: McpServer): void {
 
         await gmail.users.drafts.delete({ userId: "me", id: draftId });
         return { deleted: draftId };
+      }, account),
+  );
+
+  server.tool(
+    "gmail_send_draft",
+    "Send an existing Gmail draft. THIS SENDS REAL MAIL. Requires confirm: true, and every recipient on the draft's To, Cc and Bcc must be on the account's allowedRecipients list in accounts.json — an account with no such list cannot send at all. Without confirm, returns what would be sent and changes nothing.",
+    { ...accountShape, draftId: z.string().min(1), confirm: z.boolean().optional() },
+    async ({ account, draftId, confirm }) =>
+      safeTool(async () => {
+        const token = readAccountToken(account);
+        if (tokenHasScope(token, COMPOSE_SCOPE) === false) {
+          throw new Error(
+            [
+              `Gmail account "${account}" was authorized without send access.`,
+              `Run:\n  npm run auth -- --account ${account}\n`,
+              "and approve the permission. Reading and drafting keep working meanwhile.",
+            ].join(" "),
+          );
+        }
+
+        const gmail = await gmailForAccount(account);
+        // format: "full", not "metadata" — metadata omits the MIME parts tree,
+        // so summarizeMessage would report no attachments on a draft that has
+        // them, and the pre-send impact report exists to show exactly that.
+        const draft = await gmail.users.drafts.get({ userId: "me", id: draftId, format: "full" });
+        const summary = summarizeMessage(draft.data.message ?? {});
+
+        const addresses = extractAddresses(summary.headers.to, summary.headers.cc, summary.headers.bcc);
+        if (!addresses.length) {
+          throw new Error(`Draft ${draftId} has no recipients. Nothing was sent.`);
+        }
+
+        const { allowedRecipients } = getAccountConfig(account);
+        const verdicts = checkRecipients(addresses, allowedRecipients);
+
+        if (!confirm) {
+          return {
+            wouldSend: {
+              draftId,
+              to: summary.headers.to,
+              cc: summary.headers.cc,
+              bcc: summary.headers.bcc,
+              subject: summary.headers.subject,
+              attachments: summary.attachments?.map((attachment) => ({
+                filename: attachment.filename,
+                sizeBytes: attachment.sizeBytes,
+              })),
+            },
+            recipients: verdicts,
+            sendable: verdicts.every((verdict) => verdict.allowed),
+            note: "Nothing was sent. Call again with confirm: true to send.",
+          };
+        }
+
+        if (!verdicts.every((verdict) => verdict.allowed)) {
+          throw new Error(describeAllowlistRefusal(account, verdicts));
+        }
+
+        const sent = await gmail.users.drafts.send({ userId: "me", requestBody: { id: draftId } });
+        return { sent: sent.data };
       }, account),
   );
 }
