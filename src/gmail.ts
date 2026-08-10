@@ -96,6 +96,47 @@ function collectBodies(part: gmail_v1.Schema$MessagePart | undefined, mimeType: 
   }
 }
 
+export type AttachmentMetadata = {
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  attachmentId: string;
+  inline: boolean;
+};
+
+function partHeader(part: gmail_v1.Schema$MessagePart, name: string): string {
+  return part.headers?.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value ?? "";
+}
+
+// A part carrying an attachmentId is one whose bytes Gmail did not inline and
+// which must be fetched separately — which is exactly the set of parts
+// gmail_get_attachment can retrieve. Body parts carry body.data instead.
+export function collectAttachments(
+  part: gmail_v1.Schema$MessagePart | undefined,
+  found: AttachmentMetadata[] = [],
+): AttachmentMetadata[] {
+  if (!part) {
+    return found;
+  }
+
+  const attachmentId = part.body?.attachmentId;
+  if (attachmentId) {
+    found.push({
+      filename: part.filename ?? "",
+      mimeType: part.mimeType ?? "application/octet-stream",
+      sizeBytes: part.body?.size ?? 0,
+      attachmentId,
+      inline: partHeader(part, "Content-Disposition").trim().toLowerCase().startsWith("inline"),
+    });
+  }
+
+  for (const child of part.parts ?? []) {
+    collectAttachments(child, found);
+  }
+
+  return found;
+}
+
 export function messageHeader(message: gmail_v1.Schema$Message, name: string): string | undefined {
   return message.payload?.headers?.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value ?? undefined;
 }
@@ -105,6 +146,7 @@ export function summarizeMessage(message: gmail_v1.Schema$Message) {
   const htmlBodies: string[] = [];
   collectBodies(message.payload, "text/plain", textBodies);
   collectBodies(message.payload, "text/html", htmlBodies);
+  const attachments = collectAttachments(message.payload);
 
   return {
     id: message.id,
@@ -123,6 +165,7 @@ export function summarizeMessage(message: gmail_v1.Schema$Message) {
     },
     bodyText: textBodies.join("\n\n").trim() || undefined,
     bodyHtml: htmlBodies.join("\n\n").trim() || undefined,
+    attachments: attachments.length ? attachments : undefined,
   };
 }
 

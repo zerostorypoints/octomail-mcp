@@ -2,10 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   FILTER_SCOPE,
+  collectAttachments,
   describeAccountError,
   describeMissingFilterScope,
   isInvalidGrantError,
   isScopeInsufficientError,
+  summarizeMessage,
   tokenHasScope,
 } from "./gmail.js";
 
@@ -173,4 +175,73 @@ test("describeMissingFilterScope names the account and the re-auth command", () 
   const message = describeMissingFilterScope("work");
   assert.match(message, /Gmail account "work"/);
   assert.match(message, /npm run auth -- --account work/);
+});
+
+const messageWithAttachments = {
+  id: "m1",
+  threadId: "t1",
+  payload: {
+    mimeType: "multipart/mixed",
+    parts: [
+      { mimeType: "text/plain", body: { data: Buffer.from("Treść wiadomości").toString("base64url") } },
+      {
+        mimeType: "multipart/related",
+        parts: [
+          {
+            mimeType: "image/png",
+            filename: "logo.png",
+            headers: [{ name: "Content-Disposition", value: "inline; filename=\"logo.png\"" }],
+            body: { size: 1024, attachmentId: "att-logo" },
+          },
+        ],
+      },
+      {
+        mimeType: "application/pdf",
+        filename: "faktura_wrzesień.pdf",
+        headers: [{ name: "Content-Disposition", value: "attachment; filename=\"faktura.pdf\"" }],
+        body: { size: 20480, attachmentId: "att-pdf" },
+      },
+    ],
+  },
+};
+
+test("collectAttachments finds attachments nested at any depth", () => {
+  const found = collectAttachments(messageWithAttachments.payload);
+  assert.deepEqual(
+    found.map((a) => a.attachmentId),
+    ["att-logo", "att-pdf"],
+  );
+});
+
+test("collectAttachments reports filename, mime type and size", () => {
+  const [, pdf] = collectAttachments(messageWithAttachments.payload);
+  assert.equal(pdf.filename, "faktura_wrzesień.pdf");
+  assert.equal(pdf.mimeType, "application/pdf");
+  assert.equal(pdf.sizeBytes, 20480);
+});
+
+test("collectAttachments marks inline parts rather than hiding them", () => {
+  const [logo, pdf] = collectAttachments(messageWithAttachments.payload);
+  assert.equal(logo.inline, true);
+  assert.equal(pdf.inline, false);
+});
+
+test("collectAttachments ignores body parts, which carry data rather than an attachmentId", () => {
+  const bodyOnly = { mimeType: "text/plain", body: { data: Buffer.from("hi").toString("base64url") } };
+  assert.deepEqual(collectAttachments(bodyOnly), []);
+});
+
+test("collectAttachments returns an empty array for a message with no payload", () => {
+  assert.deepEqual(collectAttachments(undefined), []);
+});
+
+test("summarizeMessage omits attachments entirely when there are none", () => {
+  const summary = summarizeMessage({ id: "m2", payload: { mimeType: "text/plain", body: {} } });
+  assert.equal(summary.attachments, undefined);
+});
+
+test("summarizeMessage exposes attachments alongside the body", () => {
+  const summary = summarizeMessage(messageWithAttachments);
+  assert.equal(summary.bodyText, "Treść wiadomości");
+  assert.equal(summary.attachments?.length, 2);
 });
