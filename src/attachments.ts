@@ -3,7 +3,7 @@ import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { gmail_v1 } from "googleapis";
-import { downloadDir, downloadRoot } from "./config.js";
+import { downloadDir } from "./config.js";
 import { collectAttachments, gmailForAccount } from "./gmail.js";
 import { accountShape, safeTool } from "./tools.js";
 import type { OutboundAttachment } from "./mime.js";
@@ -36,6 +36,42 @@ export function uniqueFilePath(dir: string, filename: string, exists: (candidate
   }
 
   return candidate;
+}
+
+// uniqueFilePath's probe-then-write is a check-then-act race: two concurrent
+// fetches of same-named attachments on one account can both probe, both see
+// the path free, and the second fs.writeFileSync silently overwrites the
+// first. flag: "wx" makes the write itself atomic — it fails with EEXIST
+// instead of overwriting — and on that failure a fresh unique path is
+// recomputed against current disk state and retried, bounded so a persistent
+// failure surfaces as an error rather than an infinite loop.
+const MAX_EXCLUSIVE_WRITE_ATTEMPTS = 10;
+
+export function writeAttachmentFileExclusive(
+  directory: string,
+  filename: string,
+  content: Buffer,
+  exists: (candidate: string) => boolean = (candidate) => fs.existsSync(candidate),
+  writeFileSync: (target: string, data: Buffer) => void = (target, data) =>
+    fs.writeFileSync(target, data, { mode: 0o600, flag: "wx" }),
+): string {
+  for (let attempt = 0; attempt < MAX_EXCLUSIVE_WRITE_ATTEMPTS; attempt++) {
+    const target = uniqueFilePath(directory, filename, exists);
+    try {
+      writeFileSync(target, content);
+      return target;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+      // Someone else claimed `target` between our probe and our write; loop
+      // and recompute against the now-current disk state.
+    }
+  }
+
+  throw new Error(
+    `Could not find a free filename for "${filename}" in ${directory} after ${MAX_EXCLUSIVE_WRITE_ATTEMPTS} attempts.`,
+  );
 }
 
 // Base64 in a tool result lands in model context. 750 KB of payload is about
@@ -81,7 +117,7 @@ export function registerAttachmentTools(server: McpServer): void {
           id: attachmentId,
         });
 
-        if (!response.data.data) {
+        if (response.data.data === null || response.data.data === undefined) {
           throw new Error(`Gmail returned no data for attachment ${attachmentId} on message ${messageId}.`);
         }
 
@@ -101,12 +137,11 @@ export function registerAttachmentTools(server: McpServer): void {
         const directory = downloadDir(account);
         fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
 
-        const target = uniqueFilePath(
+        const target = writeAttachmentFileExclusive(
           directory,
           sanitizeAttachmentFilename(metadata.filename, attachmentId),
-          (candidate) => fs.existsSync(candidate),
+          content,
         );
-        fs.writeFileSync(target, content, { mode: 0o600 });
 
         return {
           filename: metadata.filename,
@@ -121,7 +156,9 @@ export function registerAttachmentTools(server: McpServer): void {
 export const attachmentSpecSchema = z.union([
   z
     .object({ path: z.string().min(1) })
-    .describe("A file inside OCTOMAIL_DOWNLOAD_DIR. Relative paths resolve against that root."),
+    .describe(
+      "A file inside this account's own download directory (OCTOMAIL_DOWNLOAD_DIR/<account>) — the same directory gmail_get_attachment writes into for this account, and not any other configured account's. Relative paths resolve against that directory.",
+    ),
   z
     .object({ messageId: z.string().min(1), attachmentId: z.string().min(1) })
     .describe("An attachment on an existing Gmail message, re-attached without downloading it."),
@@ -147,7 +184,7 @@ function assertWithinRoot(candidate: string, realRoot: string, inputPath: string
   const relative = path.relative(realRoot, candidate);
   if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
     throw new Error(
-      `Attachment path "${inputPath}" resolves outside the download root ${realRoot}. Outbound file attachments must live inside OCTOMAIL_DOWNLOAD_DIR. Nothing was created.`,
+      `Attachment path "${inputPath}" resolves outside the download root ${realRoot}. Outbound file attachments must live inside that account's own download directory. Nothing was created.`,
     );
   }
 }
@@ -178,6 +215,7 @@ export function resolveAttachmentPath(
 export async function loadOutboundAttachments(
   gmail: gmail_v1.Gmail,
   specs: AttachmentSpec[] | undefined,
+  account: string,
 ): Promise<OutboundAttachment[]> {
   if (!specs?.length) {
     return [];
@@ -187,7 +225,12 @@ export async function loadOutboundAttachments(
 
   for (const spec of specs) {
     if ("path" in spec) {
-      const resolved = resolveAttachmentPath(spec.path, downloadRoot());
+      // Confined to this account's own download directory, not the root
+      // shared by every configured mailbox — otherwise a file downloaded on
+      // one account could be attached to a draft sent from a different one,
+      // satisfying both accounts' allowlists without either having actually
+      // authorised cross-account access to that file.
+      const resolved = resolveAttachmentPath(spec.path, downloadDir(account));
       loaded.push({
         filename: path.basename(resolved),
         mimeType: "application/octet-stream",
@@ -213,7 +256,7 @@ export async function loadOutboundAttachments(
       id: spec.attachmentId,
     });
 
-    if (!response.data.data) {
+    if (response.data.data === null || response.data.data === undefined) {
       throw new Error(`Gmail returned no data for attachment ${spec.attachmentId}. Nothing was created.`);
     }
 

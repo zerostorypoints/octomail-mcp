@@ -71,6 +71,25 @@ test("encodeAddressHeaderValue throws when a bracketed segment contains non-ASCI
   );
 });
 
+test("encodeAddressHeaderValue throws on a non-bracketed non-ASCII bare address rather than encoding it away", () => {
+  assert.throws(
+    () => encodeAddressHeaderValue("józef@firma.pl"),
+    /ASCII/,
+  );
+});
+
+test("encodeAddressHeaderValue throws on a non-ASCII bare address following a bracketed one, rather than silently dropping it", () => {
+  assert.throws(
+    () => encodeAddressHeaderValue("Jan <jan@example.com>, żaneta@evil.com"),
+    /ASCII/,
+  );
+});
+
+test("encodeAddressHeaderValue still encodes a non-ASCII display name with no address in it", () => {
+  const encoded = encodeAddressHeaderValue("Zespół Sprzedaży");
+  assert.ok(encoded.startsWith("=?UTF-8?B?"), `display name was not encoded: ${encoded}`);
+});
+
 test("encodeHeaderValue throws on a value containing a line break", () => {
   assert.throws(() => encodeHeaderValue("Invoice\r\nBcc: attacker@example.com"), /line break/);
 });

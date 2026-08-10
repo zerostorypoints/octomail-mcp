@@ -75,7 +75,7 @@ server.tool("gmail_get_profile", "Get Gmail profile for an account.", accountSha
 
 server.tool(
   "gmail_search",
-  "Search Gmail messages on one account.",
+  "Search Gmail messages on one account. Results do not include attachment info (fetched with format: metadata, which never populates the MIME parts tree) — use gmail_read_message on a specific message to see its attachments.",
   {
     ...accountShape,
     query: z.string().describe("Gmail search query, e.g. from:alice@example.com newer_than:7d."),
@@ -93,7 +93,7 @@ server.tool(
 
 server.tool(
   "gmail_search_many",
-  "Search Gmail messages across multiple configured accounts. Results are grouped by account.",
+  "Search Gmail messages across multiple configured accounts. Results are grouped by account. Results do not include attachment info (fetched with format: metadata, which never populates the MIME parts tree) — use gmail_read_message on a specific message to see its attachments.",
   {
     accounts: z
       .array(z.string().min(1))

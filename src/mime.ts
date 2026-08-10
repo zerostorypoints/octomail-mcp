@@ -83,6 +83,18 @@ export function encodeAddressHeaderValue(value: string): string {
         return segment;
       }
 
+      // A non-bracketed segment containing "@" is a bare address (no display
+      // name wrapping it in <...>), not a display name — RFC 2047
+      // encoded-words are only valid in a display name, so encoding this
+      // would silently mangle or drop the address, exactly as the bracketed
+      // branch above must refuse rather than encode. A non-ASCII segment
+      // with no "@" is a genuine display name and is still encoded below.
+      if (!ASCII_PRINTABLE.test(segment) && segment.includes("@")) {
+        throw new Error(
+          "Address must be ASCII; internationalized domains must be supplied in punycode.",
+        );
+      }
+
       const leading = /^\s*/.exec(segment)?.[0] ?? "";
       const trailing = /\s*$/.exec(segment)?.[0] ?? "";
       return `${leading}${encodeHeaderValue(segment.trim())}${trailing}`;
@@ -171,11 +183,20 @@ export function buildMimeString(input: MimeMessageInput, randomHex: () => string
   const boundary = `----octomail-${randomHex()}`;
   const attachmentPayloads = attachments.map((attachment) => wrapBase64(attachment.content.toString("base64")));
 
-  // Standard base64's alphabet excludes "-", so none of these payloads can
-  // contain the boundary today. The check stays because switching any of
-  // them to base64url (whose alphabet includes "-") would make a collision
-  // possible, and a boundary inside a part would silently truncate the
-  // message at the receiving end.
+  // This guard covers both the encoded payloads (bodyBase64,
+  // attachmentPayloads) and the raw values they were built from (input.body,
+  // input.subject). Only the encoded half has a standing guarantee today:
+  // standard base64's alphabet excludes "-", so bodyBase64 and
+  // attachmentPayloads cannot contain the "----octomail-..." boundary. That
+  // guarantee does not extend to input.body or input.subject — plain text a
+  // sender fully controls, which can contain the boundary string outright —
+  // so their check is load-bearing right now, not merely defensive. Both
+  // halves stay in the loop: the encoded-payload check also stops mattering
+  // only if every payload here stays standard base64 forever (base64url's
+  // alphabet includes "-", which would reopen the collision), so removing
+  // either check either breaks a reachable case today or removes a guard
+  // this code relies on staying in place. A boundary appearing inside any
+  // part would silently truncate the message at the receiving end.
   for (const payload of [bodyBase64, ...attachmentPayloads, input.body, input.subject]) {
     if (payload.includes(boundary)) {
       throw new Error("Generated MIME boundary collides with message content; refusing to build a corrupt message.");

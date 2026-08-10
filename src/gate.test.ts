@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { google } from "googleapis";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerDraftTools } from "./drafts.js";
 import { registerFilterTools } from "./filters.js";
 import { registerLabelTools } from "./labels.js";
 
@@ -88,7 +89,7 @@ function installFakeGmailNetwork(routes: FakeRoute[]): { calls: FakeCall[] } {
 const ACCOUNT = "work";
 let fixtureDir: string;
 
-function setupAccountFixture(): void {
+function setupAccountFixture(allowedRecipients?: string[]): void {
   fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-gate-test-"));
   process.env.OCTOMAIL_ACCOUNTS_FILE = path.join(fixtureDir, "accounts.json");
   process.env.OCTOMAIL_TOKEN_DIR = path.join(fixtureDir, "tokens");
@@ -96,7 +97,10 @@ function setupAccountFixture(): void {
   process.env.GOOGLE_CLIENT_SECRET = "test-client-secret";
 
   fs.mkdirSync(process.env.OCTOMAIL_TOKEN_DIR, { recursive: true });
-  fs.writeFileSync(process.env.OCTOMAIL_ACCOUNTS_FILE, JSON.stringify({ accounts: { [ACCOUNT]: {} } }));
+  fs.writeFileSync(
+    process.env.OCTOMAIL_ACCOUNTS_FILE,
+    JSON.stringify({ accounts: { [ACCOUNT]: allowedRecipients ? { allowedRecipients } : {} } }),
+  );
   fs.writeFileSync(
     path.join(process.env.OCTOMAIL_TOKEN_DIR, `${ACCOUNT}.json`),
     JSON.stringify({
@@ -225,6 +229,144 @@ test("gmail_apply_labels removing TRASH with no confirm does not refuse — remo
 
     assert.equal(result.error, undefined, `expected no refusal, got: ${JSON.stringify(result)}`);
     assert.deepEqual(result.modified, ["m1"]);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+// gmail_send_draft is the one irreversible action this server has: it is the
+// only tool that puts mail on the wire to a real recipient. The tests below
+// prove — against the real registered handler, through the same fake Gmail
+// network boundary as the rest of this file — that the confirm gate and the
+// allowedRecipients gate both actually stop the network call that matters
+// (POST .../drafts/send), not merely that their pure helpers return the
+// right verdict in isolation.
+
+const DRAFT_ID = "draft1";
+
+function draftGetRoute(to: string): FakeRoute {
+  return {
+    method: "GET",
+    test: (p) => p === `/gmail/v1/users/me/drafts/${DRAFT_ID}`,
+    respond: () => ({
+      id: DRAFT_ID,
+      message: {
+        id: "msg1",
+        threadId: "thread1",
+        payload: {
+          mimeType: "text/plain",
+          headers: [
+            { name: "To", value: to },
+            { name: "Subject", value: "Hello" },
+          ],
+          body: { data: Buffer.from("Body text").toString("base64url") },
+        },
+      },
+    }),
+  };
+}
+
+function isSendCall(call: FakeCall): boolean {
+  return call.method === "POST" && call.pathname.endsWith("/drafts/send");
+}
+
+test("gmail_send_draft without confirm issues no POST to drafts/send", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDraftTools(server);
+
+    const { calls } = installFakeGmailNetwork([draftGetRoute("someone@example.com")]);
+
+    const result = await callTool(handlers, "gmail_send_draft", {
+      account: ACCOUNT,
+      draftId: DRAFT_ID,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    // sent: false is the structural marker (finding 6) that distinguishes an
+    // unconfirmed dry-run report from a real send, which returns { sent: <object> }.
+    assert.equal(result.sent, false);
+    assert.ok(!calls.some(isSendCall), `drafts/send must not have been called; calls were: ${JSON.stringify(calls)}`);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("gmail_send_draft with confirm: true, where the draft's To is not on allowedRecipients, issues no send", async () => {
+  setupAccountFixture(["@other.example"]);
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDraftTools(server);
+
+    const { calls } = installFakeGmailNetwork([draftGetRoute("someone@example.com")]);
+
+    const result = await callTool(handlers, "gmail_send_draft", {
+      account: ACCOUNT,
+      draftId: DRAFT_ID,
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /allowedRecipients/);
+    assert.ok(!calls.some(isSendCall), `drafts/send must not have been called; calls were: ${JSON.stringify(calls)}`);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("gmail_send_draft with confirm: true for an account with no allowedRecipients configured issues no send", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDraftTools(server);
+
+    const { calls } = installFakeGmailNetwork([draftGetRoute("someone@example.com")]);
+
+    const result = await callTool(handlers, "gmail_send_draft", {
+      account: ACCOUNT,
+      draftId: DRAFT_ID,
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /allowedRecipients/);
+    assert.ok(!calls.some(isSendCall), `drafts/send must not have been called; calls were: ${JSON.stringify(calls)}`);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("gmail_update_draft still completes a normal update under the new per-draft lock", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDraftTools(server);
+
+    const { calls } = installFakeGmailNetwork([
+      draftGetRoute("someone@example.com"),
+      {
+        method: "PUT",
+        test: (p) => p === `/gmail/v1/users/me/drafts/${DRAFT_ID}`,
+        respond: () => ({ id: DRAFT_ID, message: { id: "msg2", threadId: "thread1" } }),
+      },
+    ]);
+
+    const result = await callTool(handlers, "gmail_update_draft", {
+      account: ACCOUNT,
+      draftId: DRAFT_ID,
+      to: "someone@example.com",
+      subject: "Updated subject",
+      body: "Updated body",
+    });
+
+    // The lock (finding 1) chains this operation onto any prior one for the
+    // same "account:draftId" key and must still let a normal, uncontended
+    // update finish rather than hang — this is the no-deadlock proof.
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.id, DRAFT_ID);
+    assert.ok(
+      calls.some((call) => call.method === "PUT" && call.pathname === `/gmail/v1/users/me/drafts/${DRAFT_ID}`),
+      `expected a PUT to drafts/${DRAFT_ID}; calls were: ${JSON.stringify(calls)}`,
+    );
   } finally {
     teardownAccountFixture();
   }
