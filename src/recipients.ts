@@ -27,16 +27,6 @@ const ADDRESS_TOKEN = /[^\s<>,;]+@[^\s<>,;]+/gu;
 
 const ASCII_ONLY = /^[\x21-\x7e]+$/;
 
-// RFC 5322 permits CFWS (comments and whitespace) around the `@` inside an
-// addr-spec, so `evil @attacker.com` and `evil@ attacker.com` are both legal
-// spellings of `evil@attacker.com`. ADDRESS_TOKEN's two runs sit directly
-// against the literal `@`, so whitespace there is exactly the adjacency
-// problem described above: the tokenizer would fail to match that `@` at
-// all. Collapsing `\s*@\s*` first turns those forms into the ordinary
-// adjacency the tokenizer already handles, without touching the whitespace
-// that genuinely separates one recipient from the next in a header value.
-const normalizeAtSpacing = (value: string): string => value.replace(/\s*@\s*/gu, "@");
-
 export function extractAddresses(...headerValues: (string | null | undefined)[]): string[] {
   const found = new Set<string>();
 
@@ -45,10 +35,9 @@ export function extractAddresses(...headerValues: (string | null | undefined)[])
       continue;
     }
 
-    const normalized = normalizeAtSpacing(value);
     const spans: Array<[number, number]> = [];
 
-    for (const match of normalized.matchAll(ADDRESS_TOKEN)) {
+    for (const match of value.matchAll(ADDRESS_TOKEN)) {
       const start = match.index!;
       spans.push([start, start + match[0].length]);
 
@@ -67,19 +56,19 @@ export function extractAddresses(...headerValues: (string | null | undefined)[])
       }
     }
 
-    // Every `@` in the normalised value must fall inside some matched span.
-    // This is the invariant that actually closes the bypass class, not just
-    // this one instance of it: the whitespace case above is just today's way
-    // of gluing an excluded character against the `@`. Any future change to
-    // the exclusion set, an exotic delimiter we haven't thought of, a second
-    // `@` in a weird position — anything that produces an adjacency the
-    // tokenizer can't claim — hits this check instead of silently vanishing.
-    // An address the tokenizer cannot see is exactly the unsafe failure this
-    // module exists to prevent, so there is no safe way to keep going:
-    // refuse the whole value rather than return a partial, possibly-wrong
-    // recipient list built on top of it.
-    for (let i = 0; i < normalized.length; i++) {
-      if (normalized[i] !== "@") {
+    // Every `@` in the value must fall inside some matched span. This is the
+    // invariant that actually closes the bypass class: whitespace (or any
+    // other excluded character) glued against an `@` makes the tokenizer
+    // fail to match that `@` at all — whether it sits inside one address
+    // ("evil @attacker.com"), between two addresses ("a@x.com @b@y.com"), or
+    // next to a decorative `@` in a display name ("Sales @ Acme
+    // <sales@acme.com>"). Rather than try to rescue those cases, we detect
+    // the unclaimed `@` and refuse outright. An address the tokenizer cannot
+    // see is exactly the unsafe failure this module exists to prevent, so
+    // there is no safe way to keep going: refuse the whole value rather than
+    // return a partial, possibly-wrong recipient list built on top of it.
+    for (let i = 0; i < value.length; i++) {
+      if (value[i] !== "@") {
         continue;
       }
       if (!spans.some(([start, end]) => i >= start && i < end)) {
