@@ -1,7 +1,10 @@
 {
   "accounts": {
     "personal": { "label": "Personal Gmail" },
-    "work": { "label": "Work (Google Workspace)" },
+    "work": {
+      "label": "Work (Google Workspace)",
+      "allowedRecipients": ["@example.com", "accountant@partner.example"]
+    },
     "support": {}
   }
 }

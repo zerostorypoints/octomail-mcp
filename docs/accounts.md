@@ -32,7 +32,10 @@ is optional and just sets the free-text description stored alongside it.
 {
   "accounts": {
     "personal": { "label": "Personal Gmail" },
-    "work": { "label": "Work (Google Workspace)" },
+    "work": {
+      "label": "Work (Google Workspace)",
+      "allowedRecipients": ["@example.com", "accountant@partner.example"]
+    },
     "support": {}
   }
 }
@@ -45,6 +48,45 @@ Every field on an account entry is optional:
 | `tokenPath` | Where the OAuth token is stored. Defaults to `~/.octomail/tokens/<alias>.json`. |
 | `label` | Free text you write, for your own reference. Not used by the server logic. |
 | `email` | The account's real Gmail address, refreshed automatically after every successful authorization. Don't hand-edit this — let `npm run auth` fill it in. |
+| `allowedRecipients` | The recipient allowlist that `gmail_send_draft` checks before sending. See below. |
+
+In the example above, `personal` and `support` have no `allowedRecipients`
+field, so `gmail_send_draft` refuses to send anything on either account —
+that is the default for every account until you add the field.
+
+## `allowedRecipients`: who an account can send to
+
+`gmail_send_draft` is the only tool that transmits mail, and it will not send
+unless every address on the draft's To, Cc, and Bcc is covered by the
+account's `allowedRecipients` list. An account with no `allowedRecipients`
+field cannot send at all, regardless of what `gmail_create_draft` was told to
+address the draft to.
+
+Each entry in the list is one of two forms:
+
+- A full address: `"person@example.com"` — permits sending to that address
+  only.
+- A domain: `"@example.com"` — permits sending to any address at that exact
+  domain.
+
+Notes on matching:
+
+- Matching is case-insensitive.
+- Domain entries do **not** cover subdomains: `"@example.com"` does not
+  permit `x@mail.example.com`. Add `"@mail.example.com"` separately if you
+  need that.
+- Entries must be ASCII. `npm run auth` and the server both reject a
+  non-ASCII entry at load time, because a Cyrillic homograph domain renders
+  identically to its Latin lookalike and there is no safe way to tell them
+  apart automatically.
+- If Gmail's own recipient headers on the draft contain anything the address
+  extractor can't fully account for, `gmail_send_draft` refuses the send
+  rather than guess which parts are addresses.
+
+`gmail_create_draft` will still create a draft addressed to a recipient
+outside the allowlist — it returns a warning instead of failing, since
+nothing has actually left the account yet. The refusal happens at
+`gmail_send_draft`, the irreversible step.
 
 ## Where tokens live
 

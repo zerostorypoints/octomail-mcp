@@ -8,12 +8,34 @@ authorizes and stores its credentials independently.
 
 ## Safety
 
-The tool list below deliberately excludes send: no tool composes and sends a
-message, and `gmail_create_draft` only ever creates a draft. The one way mail
-can leave an account is `gmail_create_filter`'s optional `forward` action,
-which installs a standing Gmail rule — and Gmail only accepts an address you
-have already verified on that account, which this server has no scope to do
-for you. No tool ever deletes a message outright, but `TRASH` and `SPAM` are
+Sending exists: `gmail_send_draft` sends real mail. No tool composes and
+sends in one call — `gmail_create_draft` only ever creates a draft, and
+sending is always a separate, later step against a draft you can open and
+read in Gmail first. Without `confirm: true`, `gmail_send_draft` only
+reports what it would send — recipients, subject, attachment names and
+sizes — and changes nothing. With `confirm: true` it still refuses unless
+every address on the draft's To, Cc, and Bcc appears in that account's
+`allowedRecipients` in `accounts.json`; an account with no `allowedRecipients`
+field cannot send at all, which is the default for every account. An
+allowlist entry is a full address (`person@example.com`) or a domain
+(`@example.com`); matching is case-insensitive, subdomains are not included,
+and a non-ASCII recipient is refused outright rather than normalised, since a
+homograph domain can render identically to its Latin lookalike. If the
+recipient list contains anything the address extractor cannot fully account
+for, the send is refused rather than guessed at. `gmail_create_draft` still
+warns, but creates the draft, when a recipient isn't allowlisted — nothing
+leaves the account until `gmail_send_draft` runs, so the refusal belongs
+there. The OAuth token has always held the `gmail.compose` scope, which
+grants sending; the previous version of this guarantee described the tool
+surface, not the credential — anything holding an account's tokens could
+already send. `gmail_get_attachment` writes files into
+`OCTOMAIL_DOWNLOAD_DIR` (default `~/.octomail/attachments/<account>/`) at
+file mode `0600` in a directory at `0700`, and outbound file attachments
+must live inside that directory. Another way mail can leave an account is
+`gmail_create_filter`'s optional `forward` action, which installs a standing
+Gmail rule — and Gmail only accepts an address you have already verified on
+that account, which this server has no scope to do for you. No tool ever
+deletes a message outright, but `TRASH` and `SPAM` are
 ordinary Gmail labels, and adding either one to a message — directly via
 `gmail_apply_labels`, as a standing rule via `gmail_create_filter`, or applied
 to existing mail via `gmail_backfill_filter` — does trash or spam it, and
@@ -86,7 +108,13 @@ spam, and deletion actions unless the call carries an explicit
 - `gmail_update_label(account, label, newName?, textColor?, backgroundColor?, labelListVisibility?, messageListVisibility?, renameDescendants?)`
 - `gmail_delete_label(account, label, confirm?)`
 - `gmail_archive(account, messageIds)`
-- `gmail_create_draft(account, to, subject, body, cc?, bcc?, replyToMessageId?)`
+- `gmail_create_draft(account, to, subject, body, cc?, bcc?, replyToMessageId?, attachments?)`
+- `gmail_list_drafts(account, maxResults?)`
+- `gmail_get_draft(account, draftId)`
+- `gmail_update_draft(account, draftId, to, subject, body, cc?, bcc?, attachments?)`
+- `gmail_delete_draft(account, draftId, confirm?)`
+- `gmail_send_draft(account, draftId, confirm?)`
+- `gmail_get_attachment(account, messageId, attachmentId, encoding?)`
 - `gmail_list_filters(account)`
 - `gmail_create_filter(account, from?, to?, subject?, query?, negatedQuery?, hasAttachment?, excludeChats?, size?, sizeComparison?, addLabelNames?, removeLabelNames?, forward?, confirm?)`
 - `gmail_delete_filter(account, filterId, confirm?)`
@@ -120,7 +148,9 @@ spam, and deletion actions unless the call carries an explicit
   omitted, and returns per-account errors without hiding successful results
   from other accounts.
 - `gmail_archive` only removes the `INBOX` label.
-- `gmail_create_draft` creates a draft only — there is no send tool.
+- `gmail_create_draft` and `gmail_update_draft` create or replace a draft
+  only; `gmail_send_draft` is the one tool that transmits mail, and it is
+  gated as described in Safety above.
 - Unknown account aliases and missing token files return readable errors.
 
 ## License
