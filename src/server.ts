@@ -4,8 +4,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { registerAttachmentTools } from "./attachments.js";
 import { loadAccountsConfig } from "./config.js";
+import { registerDraftTools } from "./drafts.js";
 import { registerFilterTools } from "./filters.js";
-import { describeAccountError, encodeMimeMessage, gmailForAccount, messageHeader, summarizeMessage } from "./gmail.js";
+import { describeAccountError, gmailForAccount, summarizeMessage } from "./gmail.js";
 import { registerLabelTools } from "./labels.js";
 import { accountShape, safeTool } from "./tools.js";
 
@@ -208,55 +209,10 @@ server.tool(
     }, account),
 );
 
-server.tool(
-  "gmail_create_draft",
-  "Create a Gmail draft. This tool does not send email.",
-  {
-    ...accountShape,
-    to: z.string().min(1),
-    subject: z.string(),
-    body: z.string(),
-    cc: z.string().optional(),
-    bcc: z.string().optional(),
-    replyToMessageId: z.string().optional(),
-  },
-  async ({ account, to, subject, body, cc, bcc, replyToMessageId }) =>
-    safeTool(async () => {
-      const gmail = await gmailForAccount(account);
-      let threadId: string | undefined;
-      let inReplyTo: string | undefined;
-      let references: string | undefined;
-
-      if (replyToMessageId) {
-        const replyTo = await gmail.users.messages.get({
-          userId: "me",
-          id: replyToMessageId,
-          format: "metadata",
-          metadataHeaders: ["Message-ID", "References"],
-        });
-        threadId = replyTo.data.threadId ?? undefined;
-        inReplyTo = messageHeader(replyTo.data, "Message-ID");
-        const priorReferences = messageHeader(replyTo.data, "References");
-        references = [priorReferences, inReplyTo].filter(Boolean).join(" ") || undefined;
-      }
-
-      const draft = await gmail.users.drafts.create({
-        userId: "me",
-        requestBody: {
-          message: {
-            raw: encodeMimeMessage({ to, subject, body, cc, bcc, inReplyTo, references }),
-            threadId,
-          },
-        },
-      });
-
-      return draft.data;
-    }, account),
-);
-
 registerLabelTools(server);
 registerFilterTools(server);
 registerAttachmentTools(server);
+registerDraftTools(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

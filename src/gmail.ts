@@ -169,31 +169,6 @@ export function summarizeMessage(message: gmail_v1.Schema$Message) {
   };
 }
 
-export function encodeMimeMessage(input: {
-  to: string;
-  subject: string;
-  body: string;
-  cc?: string;
-  bcc?: string;
-  inReplyTo?: string;
-  references?: string;
-}): string {
-  const headers = [
-    `To: ${input.to}`,
-    input.cc ? `Cc: ${input.cc}` : undefined,
-    input.bcc ? `Bcc: ${input.bcc}` : undefined,
-    `Subject: ${input.subject}`,
-    input.inReplyTo ? `In-Reply-To: ${input.inReplyTo}` : undefined,
-    input.references ? `References: ${input.references}` : undefined,
-    "MIME-Version: 1.0",
-    'Content-Type: text/plain; charset="UTF-8"',
-    "Content-Transfer-Encoding: 8bit",
-  ].filter(Boolean);
-
-  const message = `${headers.join("\r\n")}\r\n\r\n${input.body}`;
-  return Buffer.from(message).toString("base64url");
-}
-
 export function isInvalidGrantError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
