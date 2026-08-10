@@ -133,6 +133,11 @@ export function validateRawConfig(parsed: unknown, configPath: string): RawAccou
         if (typeof recipient !== "string") {
           throw new Error(`Invalid allowedRecipients entry for account "${alias}". Expected a string.`);
         }
+        if (recipient.trim() === "") {
+          throw new Error(
+            `allowedRecipients entry for account "${alias}" is empty. Expected a full address or an "@domain" entry.`,
+          );
+        }
         if (!/^[\x21-\x7e]+$/.test(recipient)) {
           throw new Error(
             `allowedRecipients entry "${recipient}" for account "${alias}" contains non-ASCII characters. Use ASCII only — a non-ASCII domain cannot be distinguished from a homograph.`,

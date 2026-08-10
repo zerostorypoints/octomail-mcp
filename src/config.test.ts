@@ -170,3 +170,10 @@ test("validateRawConfig rejects a non-ASCII allowlist entry", () => {
     /ASCII/i,
   );
 });
+
+test("validateRawConfig rejects an empty allowlist entry with an accurate message", () => {
+  assert.throws(
+    () => validateRawConfig({ accounts: { work: { allowedRecipients: [""] } } }, "test.json"),
+    (err: unknown) => err instanceof Error && /empty/i.test(err.message) && !/non-ASCII/i.test(err.message),
+  );
+});

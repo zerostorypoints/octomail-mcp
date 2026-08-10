@@ -79,3 +79,15 @@ test("checkRecipients reports a verdict for every address, not just failures", (
   assert.equal(verdicts[0].allowed, true);
   assert.equal(verdicts[1].allowed, false);
 });
+
+test("checkRecipients returns no verdicts for no addresses, which callers must not read as approval", () => {
+  assert.deepEqual(checkRecipients([], allowlist), []);
+});
+
+test("extractAddresses strips surrounding single quotes and does not swallow them into the token", () => {
+  assert.deepEqual(extractAddresses("'evil@attacker.com'"), ["evil@attacker.com"]);
+});
+
+test("extractAddresses trims a trailing full stop after an address", () => {
+  assert.deepEqual(extractAddresses("Reach me at alice@example.com."), ["alice@example.com"]);
+});

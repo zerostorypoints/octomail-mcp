@@ -6,7 +6,7 @@
 // over-extractor that guesses wrong extracts EXTRA addresses and can only
 // refuse a send that should have been allowed. For a deny-based gate,
 // over-extraction is the safe failure.
-const ADDRESS_TOKEN = /[^\s<>,;:"()[\]\\]+@[^\s<>,;:"()[\]\\]+/gu;
+const ADDRESS_TOKEN = /[^\s<>,;:"'{}()[\]\\]+@[^\s<>,;:"'{}()[\]\\]+/gu;
 
 const ASCII_ONLY = /^[\x21-\x7e]+$/;
 
@@ -19,7 +19,10 @@ export function extractAddresses(...headerValues: (string | null | undefined)[])
     }
 
     for (const match of value.matchAll(ADDRESS_TOKEN)) {
-      const trimmed = match[0].replace(/[.,;:>]+$/, "");
+      // Sentence-final punctuation ("Reach me at alice@example.com.") can attach
+      // to the token. Every other delimiter here is already excluded from
+      // ADDRESS_TOKEN itself, so only a trailing dot can ever occur.
+      const trimmed = match[0].replace(/\.+$/, "");
       if (trimmed) {
         found.add(trimmed);
       }
@@ -35,6 +38,10 @@ export type RecipientVerdict = {
   reason?: string;
 };
 
+// Returns one verdict per input address, in order — an empty `addresses` array
+// yields an empty array of verdicts. Callers must check
+// `verdicts.length > 0 && verdicts.every(...)`: a bare `.every(...)` on an
+// empty array is vacuously true and would read "no recipients found" as "all allowed".
 export function checkRecipients(addresses: string[], allowlist: string[] | undefined): RecipientVerdict[] {
   if (!allowlist?.length) {
     return addresses.map((address) => ({
