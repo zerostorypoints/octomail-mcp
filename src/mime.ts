@@ -131,6 +131,13 @@ function wrapBase64(value: string): string {
 }
 
 export function buildMimeString(input: MimeMessageInput, randomHex: () => string = () => randomBytes(16).toString("hex")): string {
+  if (input.inReplyTo !== undefined) {
+    assertNoLineBreak(input.inReplyTo);
+  }
+  if (input.references !== undefined) {
+    assertNoLineBreak(input.references);
+  }
+
   const headers = [
     `To: ${encodeAddressHeaderValue(input.to)}`,
     input.cc ? `Cc: ${encodeAddressHeaderValue(input.cc)}` : undefined,
@@ -154,12 +161,21 @@ export function buildMimeString(input: MimeMessageInput, randomHex: () => string
     ].join("\r\n");
   }
 
+  for (const attachment of attachments) {
+    assertNoLineBreak(attachment.mimeType);
+    if (!ASCII_PRINTABLE.test(attachment.mimeType)) {
+      throw new Error(`Attachment media type must be ASCII: ${JSON.stringify(attachment.mimeType)}`);
+    }
+  }
+
   const boundary = `----octomail-${randomHex()}`;
   const attachmentPayloads = attachments.map((attachment) => wrapBase64(attachment.content.toString("base64")));
 
-  // A boundary appearing inside a part would silently truncate the message at
-  // the receiving end. At 128 bits of randomness this cannot happen by
-  // accident; the check turns a corrupt send into a refused one.
+  // Standard base64's alphabet excludes "-", so none of these payloads can
+  // contain the boundary today. The check stays because switching any of
+  // them to base64url (whose alphabet includes "-") would make a collision
+  // possible, and a boundary inside a part would silently truncate the
+  // message at the receiving end.
   for (const payload of [bodyBase64, ...attachmentPayloads, input.body, input.subject]) {
     if (payload.includes(boundary)) {
       throw new Error("Generated MIME boundary collides with message content; refusing to build a corrupt message.");

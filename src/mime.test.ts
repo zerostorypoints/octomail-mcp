@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { encodeAddressHeaderValue, encodeFilenameParameter, encodeHeaderValue } from "./mime.js";
-import { buildMimeMessage, buildMimeString } from "./mime.js";
+import { buildMimeMessage, buildMimeString, encodeAddressHeaderValue, encodeFilenameParameter, encodeHeaderValue } from "./mime.js";
 
 test("encodeHeaderValue leaves a plain ASCII value untouched", () => {
   assert.equal(encodeHeaderValue("Invoice for August"), "Invoice for August");
@@ -127,6 +126,20 @@ test("buildMimeString includes threading headers when supplied", () => {
   assert.ok(raw.includes("References: <x@y> <a@b>"));
 });
 
+test("buildMimeString throws when inReplyTo contains a line break", () => {
+  assert.throws(
+    () => buildMimeString({ ...plain, inReplyTo: "<msg1>\r\nBcc: attacker@example.com" }),
+    /line break/,
+  );
+});
+
+test("buildMimeString throws when references contains a line break", () => {
+  assert.throws(
+    () => buildMimeString({ ...plain, references: "<msg1>\r\nBcc: attacker@example.com" }),
+    /line break/,
+  );
+});
+
 test("buildMimeString encodes a Polish subject as an encoded-word", () => {
   const raw = buildMimeString({ ...plain, subject: "Faktura za wrzesień" });
   assert.ok(raw.includes("Subject: =?UTF-8?B?"), "subject was not encoded");
@@ -169,6 +182,30 @@ test("buildMimeString wraps base64 payloads at 76 characters", () => {
   for (const line of raw.split("\r\n")) {
     assert.ok(line.length <= 76, `line of ${line.length} characters exceeds 76`);
   }
+});
+
+test("buildMimeString throws when an attachment mimeType contains a line break", () => {
+  assert.throws(
+    () =>
+      buildMimeString({
+        ...plain,
+        attachments: [
+          { filename: "a.pdf", mimeType: "application/pdf\r\nBcc: attacker@example.com", content: Buffer.from("x") },
+        ],
+      }),
+    /line break/,
+  );
+});
+
+test("buildMimeString throws when an attachment mimeType is non-ASCII", () => {
+  assert.throws(
+    () =>
+      buildMimeString({
+        ...plain,
+        attachments: [{ filename: "a.pdf", mimeType: "application/pdf™", content: Buffer.from("x") }],
+      }),
+    /ASCII/,
+  );
 });
 
 test("buildMimeString refuses a boundary that collides with message content", () => {
