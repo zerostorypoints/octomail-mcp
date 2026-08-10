@@ -2,9 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { downloadDir } from "./config.js";
+import type { gmail_v1 } from "googleapis";
+import { downloadDir, downloadRoot } from "./config.js";
 import { collectAttachments, gmailForAccount } from "./gmail.js";
 import { accountShape, safeTool } from "./tools.js";
+import type { OutboundAttachment } from "./mime.js";
 
 // Control characters and both separator styles. The sender chooses the
 // filename parameter, so nothing in it is trusted.
@@ -114,4 +116,113 @@ export function registerAttachmentTools(server: McpServer): void {
         };
       }, account),
   );
+}
+
+export const attachmentSpecSchema = z.union([
+  z
+    .object({ path: z.string().min(1) })
+    .describe("A file inside OCTOMAIL_DOWNLOAD_DIR. Relative paths resolve against that root."),
+  z
+    .object({ messageId: z.string().min(1), attachmentId: z.string().min(1) })
+    .describe("An attachment on an existing Gmail message, re-attached without downloading it."),
+]);
+
+export type AttachmentSpec = z.infer<typeof attachmentSpecSchema>;
+
+// Containment by string prefix is bypassable: a symlink placed inside the root
+// and pointing outside it passes a prefix test. Both sides are resolved to
+// real paths before comparison.
+//
+// Escape is checked twice: once lexically (on the joined-but-not-yet-real
+// path, before touching the filesystem) and once again on the realpath'd
+// target. The lexical check is what lets a traversal like "../../etc/hosts"
+// be reported as an escape rather than "does not exist" — realpathSync can
+// only resolve paths that exist, and a `..` traversal from a deeply nested
+// tmp directory (as on macOS) may not land on a real file at all, even
+// though it plainly leaves the root. The realpath check is what catches a
+// symlink that sits inside the root but points outside it — a case the
+// lexical check alone cannot see, since the symlink's own path is inside
+// the root right up until it's dereferenced.
+function assertWithinRoot(candidate: string, realRoot: string, inputPath: string): void {
+  const relative = path.relative(realRoot, candidate);
+  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(
+      `Attachment path "${inputPath}" resolves outside the download root ${realRoot}. Outbound file attachments must live inside OCTOMAIL_DOWNLOAD_DIR. Nothing was created.`,
+    );
+  }
+}
+
+export function resolveAttachmentPath(
+  inputPath: string,
+  root: string,
+  realpathSync: (candidate: string) => string = fs.realpathSync,
+): string {
+  const realRoot = realpathSync(root);
+  const resolved = path.resolve(realRoot, inputPath);
+  assertWithinRoot(resolved, realRoot, inputPath);
+
+  let realTarget: string;
+  try {
+    realTarget = realpathSync(resolved);
+  } catch {
+    throw new Error(
+      `Attachment path "${inputPath}" does not exist inside the download root ${realRoot}.`,
+    );
+  }
+
+  assertWithinRoot(realTarget, realRoot, inputPath);
+
+  return realTarget;
+}
+
+export async function loadOutboundAttachments(
+  gmail: gmail_v1.Gmail,
+  specs: AttachmentSpec[] | undefined,
+): Promise<OutboundAttachment[]> {
+  if (!specs?.length) {
+    return [];
+  }
+
+  const loaded: OutboundAttachment[] = [];
+
+  for (const spec of specs) {
+    if ("path" in spec) {
+      const resolved = resolveAttachmentPath(spec.path, downloadRoot());
+      loaded.push({
+        filename: path.basename(resolved),
+        mimeType: "application/octet-stream",
+        content: fs.readFileSync(resolved),
+      });
+      continue;
+    }
+
+    const message = await gmail.users.messages.get({ userId: "me", id: spec.messageId, format: "full" });
+    const metadata = collectAttachments(message.data.payload).find(
+      (candidate) => candidate.attachmentId === spec.attachmentId,
+    );
+
+    if (!metadata) {
+      throw new Error(
+        `Message ${spec.messageId} has no attachment with id ${spec.attachmentId}. Nothing was created.`,
+      );
+    }
+
+    const response = await gmail.users.messages.attachments.get({
+      userId: "me",
+      messageId: spec.messageId,
+      id: spec.attachmentId,
+    });
+
+    if (!response.data.data) {
+      throw new Error(`Gmail returned no data for attachment ${spec.attachmentId}. Nothing was created.`);
+    }
+
+    loaded.push({
+      filename: sanitizeAttachmentFilename(metadata.filename, spec.attachmentId),
+      mimeType: metadata.mimeType,
+      content: Buffer.from(response.data.data, "base64url"),
+    });
+  }
+
+  return loaded;
 }

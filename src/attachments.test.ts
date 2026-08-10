@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import { sanitizeAttachmentFilename, uniqueFilePath } from "./attachments.js";
 import { MAX_INLINE_BASE64_BYTES, assertInlineSizeWithinLimit } from "./attachments.js";
+import { resolveAttachmentPath } from "./attachments.js";
 
 test("sanitizeAttachmentFilename keeps an ordinary name", () => {
   assert.equal(sanitizeAttachmentFilename("faktura.pdf", "att-1"), "faktura.pdf");
@@ -67,4 +70,47 @@ test("assertInlineSizeWithinLimit points the caller at file mode", () => {
 
 test("assertInlineSizeWithinLimit reports the actual size so the caller can judge", () => {
   assert.throws(() => assertInlineSizeWithinLimit(9_000_000), /9000000/);
+});
+
+test("resolveAttachmentPath accepts a file inside the root", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-root-"));
+  const file = path.join(root, "faktura.pdf");
+  fs.writeFileSync(file, "x");
+  assert.equal(resolveAttachmentPath("faktura.pdf", root), fs.realpathSync(file));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("resolveAttachmentPath rejects a traversal path", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-root-"));
+  assert.throws(() => resolveAttachmentPath("../../etc/hosts", root), /outside the download root/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("resolveAttachmentPath rejects an absolute path outside the root", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-root-"));
+  assert.throws(() => resolveAttachmentPath("/etc/hosts", root), /outside the download root/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("resolveAttachmentPath rejects a symlink inside the root pointing outside it", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-root-"));
+  const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-secret-"));
+  const secret = path.join(secretDir, "id_rsa");
+  fs.writeFileSync(secret, "PRIVATE KEY");
+  fs.symlinkSync(secret, path.join(root, "innocent.pdf"));
+
+  assert.throws(
+    () => resolveAttachmentPath("innocent.pdf", root),
+    /outside the download root/,
+    "a symlink escaped the download root — string-prefix containment is not enough",
+  );
+
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(secretDir, { recursive: true, force: true });
+});
+
+test("resolveAttachmentPath reports a missing file distinctly from an escape", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-root-"));
+  assert.throws(() => resolveAttachmentPath("absent.pdf", root), /does not exist/);
+  fs.rmSync(root, { recursive: true, force: true });
 });
