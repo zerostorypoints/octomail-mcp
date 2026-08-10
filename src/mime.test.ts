@@ -46,6 +46,42 @@ test("encodeAddressHeaderValue keeps the space between display name and address"
   assert.match(encoded, /\?= <michal@example\.pl>$/);
 });
 
+test("encodeHeaderValue never splits an astral-plane (4-byte UTF-8) character across encoded-words", () => {
+  const original = "😀".repeat(80);
+  const encoded = encodeHeaderValue(original);
+  const decoded = encoded
+    .split("\r\n ")
+    .map((word) => Buffer.from(word.slice("=?UTF-8?B?".length, -"?=".length), "base64").toString("utf8"))
+    .join("");
+  assert.equal(decoded, original);
+});
+
+test("encodeAddressHeaderValue encodes only the non-ASCII display name across multiple recipients", () => {
+  const encoded = encodeAddressHeaderValue("Michał Kowalczyk <michal@example.pl>, Jan Nowak <jan@example.com>");
+  assert.ok(encoded.includes("<michal@example.pl>"), `first address was altered: ${encoded}`);
+  assert.ok(encoded.includes("<jan@example.com>"), `second address was altered: ${encoded}`);
+  assert.ok(encoded.includes("Jan Nowak <jan@example.com>"), `ASCII display name was altered: ${encoded}`);
+  assert.ok(encoded.startsWith("=?UTF-8?B?"), `non-ASCII display name was not encoded: ${encoded}`);
+});
+
+test("encodeAddressHeaderValue throws when a bracketed segment contains non-ASCII", () => {
+  assert.throws(
+    () => encodeAddressHeaderValue("Zespół <Sprzedaż> <zespol@example.pl>"),
+    /ASCII/,
+  );
+});
+
+test("encodeHeaderValue throws on a value containing a line break", () => {
+  assert.throws(() => encodeHeaderValue("Invoice\r\nBcc: attacker@example.com"), /line break/);
+});
+
+test("encodeAddressHeaderValue throws on a value containing a line break", () => {
+  assert.throws(
+    () => encodeAddressHeaderValue("a@example.com\r\nBcc: attacker@example.com"),
+    /line break/,
+  );
+});
+
 test("encodeFilenameParameter quotes a plain ASCII filename", () => {
   assert.equal(encodeFilenameParameter("faktura.pdf"), 'filename="faktura.pdf"');
 });
