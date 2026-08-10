@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { encodeAddressHeaderValue, encodeFilenameParameter, encodeHeaderValue } from "./mime.js";
+import { buildMimeMessage, buildMimeString } from "./mime.js";
 
 test("encodeHeaderValue leaves a plain ASCII value untouched", () => {
   assert.equal(encodeHeaderValue("Invoice for August"), "Invoice for August");
@@ -95,4 +96,108 @@ test("encodeFilenameParameter uses RFC 2231 for a non-ASCII filename", () => {
 test("encodeFilenameParameter escapes a filename containing a quote", () => {
   const encoded = encodeFilenameParameter('in"voice.pdf');
   assert.ok(!/^filename="[^"]*"[^"]/.test(encoded), `unescaped quote broke the parameter: ${encoded}`);
+});
+
+const plain = { to: "jan@example.pl", subject: "Hello", body: "Body text" };
+
+test("buildMimeString produces a single-part text/plain message with no attachments", () => {
+  const raw = buildMimeString(plain);
+  assert.match(raw, /^To: jan@example\.pl\r\n/);
+  assert.ok(raw.includes('Content-Type: text/plain; charset="UTF-8"'));
+  assert.ok(!raw.includes("multipart"), "unexpected multipart for an attachment-free message");
+});
+
+test("buildMimeString base64-encodes the body rather than sending 8bit", () => {
+  const raw = buildMimeString(plain);
+  assert.ok(raw.includes("Content-Transfer-Encoding: base64"));
+  const body = raw.split("\r\n\r\n")[1];
+  assert.equal(Buffer.from(body, "base64").toString("utf8"), "Body text");
+});
+
+test("buildMimeString omits headers that were not supplied", () => {
+  const raw = buildMimeString(plain);
+  assert.ok(!raw.includes("Cc:"));
+  assert.ok(!raw.includes("Bcc:"));
+  assert.ok(!raw.includes("In-Reply-To:"));
+});
+
+test("buildMimeString includes threading headers when supplied", () => {
+  const raw = buildMimeString({ ...plain, inReplyTo: "<a@b>", references: "<x@y> <a@b>" });
+  assert.ok(raw.includes("In-Reply-To: <a@b>"));
+  assert.ok(raw.includes("References: <x@y> <a@b>"));
+});
+
+test("buildMimeString encodes a Polish subject as an encoded-word", () => {
+  const raw = buildMimeString({ ...plain, subject: "Faktura za wrzesień" });
+  assert.ok(raw.includes("Subject: =?UTF-8?B?"), "subject was not encoded");
+  assert.ok(!raw.includes("wrzesień"), "raw UTF-8 leaked into the header");
+});
+
+const withAttachment = {
+  ...plain,
+  attachments: [
+    { filename: "faktura_wrzesień.pdf", mimeType: "application/pdf", content: Buffer.from("PDFDATA") },
+  ],
+};
+
+test("buildMimeString switches to multipart/mixed when attachments are present", () => {
+  const raw = buildMimeString(withAttachment, () => "deadbeef");
+  assert.ok(raw.includes('Content-Type: multipart/mixed; boundary="----octomail-deadbeef"'));
+});
+
+test("buildMimeString closes the multipart with a terminating boundary", () => {
+  const raw = buildMimeString(withAttachment, () => "deadbeef");
+  assert.ok(raw.endsWith("\r\n------octomail-deadbeef--"), `bad terminator: ${JSON.stringify(raw.slice(-40))}`);
+});
+
+test("buildMimeString marks the attachment part with disposition and RFC 2231 filename", () => {
+  const raw = buildMimeString(withAttachment, () => "deadbeef");
+  assert.ok(raw.includes("Content-Disposition: attachment; filename*=UTF-8''"));
+  assert.ok(raw.includes("Content-Type: application/pdf"));
+});
+
+test("buildMimeString base64-encodes attachment content", () => {
+  const raw = buildMimeString(withAttachment, () => "deadbeef");
+  assert.ok(raw.includes(Buffer.from("PDFDATA").toString("base64")));
+});
+
+test("buildMimeString wraps base64 payloads at 76 characters", () => {
+  const raw = buildMimeString({
+    ...plain,
+    attachments: [{ filename: "big.bin", mimeType: "application/octet-stream", content: Buffer.alloc(5000, 7) }],
+  }, () => "deadbeef");
+  for (const line of raw.split("\r\n")) {
+    assert.ok(line.length <= 76, `line of ${line.length} characters exceeds 76`);
+  }
+});
+
+test("buildMimeString refuses a boundary that collides with message content", () => {
+  assert.throws(
+    () => buildMimeString({ ...plain, body: "----octomail-collide", attachments: withAttachment.attachments }, () => "collide"),
+    /boundary/i,
+  );
+});
+
+test("buildMimeMessage returns base64url that decodes back to the raw message", () => {
+  const encoded = buildMimeMessage(plain);
+  assert.ok(!encoded.includes("+") && !encoded.includes("/"), "not base64url");
+  assert.equal(Buffer.from(encoded, "base64url").toString("utf8"), buildMimeString(plain));
+});
+
+test("buildMimeMessage refuses a message over the 5 MB Gmail simple-upload limit", () => {
+  assert.throws(
+    () =>
+      buildMimeMessage({
+        ...plain,
+        attachments: [{ filename: "huge.bin", mimeType: "application/octet-stream", content: Buffer.alloc(5 * 1024 * 1024) }],
+      }),
+    /resumable/i,
+  );
+});
+
+test("buildMimeMessage accepts a message just under the limit", () => {
+  const content = Buffer.alloc(3 * 1024 * 1024);
+  assert.doesNotThrow(() =>
+    buildMimeMessage({ ...plain, attachments: [{ filename: "ok.bin", mimeType: "application/octet-stream", content }] }),
+  );
 });

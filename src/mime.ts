@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 const ASCII_PRINTABLE = /^[\x20-\x7e]*$/;
 const LINE_BREAK = /[\r\n]/;
 
@@ -101,4 +103,100 @@ export function encodeFilenameParameter(filename: string): string {
   }
 
   return `filename*=UTF-8''${encodeRfc5987(filename)}`;
+}
+
+export type OutboundAttachment = {
+  filename: string;
+  mimeType: string;
+  content: Buffer;
+};
+
+export type MimeMessageInput = {
+  to: string;
+  subject: string;
+  body: string;
+  cc?: string;
+  bcc?: string;
+  inReplyTo?: string;
+  references?: string;
+  attachments?: OutboundAttachment[];
+};
+
+// Gmail's simple upload path caps at 5 MB. Beyond it a resumable upload is
+// required, which this server does not implement.
+export const MAX_MESSAGE_BYTES = 5 * 1024 * 1024;
+
+function wrapBase64(value: string): string {
+  return (value.match(/.{1,76}/g) ?? []).join("\r\n");
+}
+
+export function buildMimeString(input: MimeMessageInput, randomHex: () => string = () => randomBytes(16).toString("hex")): string {
+  const headers = [
+    `To: ${encodeAddressHeaderValue(input.to)}`,
+    input.cc ? `Cc: ${encodeAddressHeaderValue(input.cc)}` : undefined,
+    input.bcc ? `Bcc: ${encodeAddressHeaderValue(input.bcc)}` : undefined,
+    `Subject: ${encodeHeaderValue(input.subject)}`,
+    input.inReplyTo ? `In-Reply-To: ${input.inReplyTo}` : undefined,
+    input.references ? `References: ${input.references}` : undefined,
+    "MIME-Version: 1.0",
+  ].filter((header): header is string => header !== undefined);
+
+  const bodyBase64 = wrapBase64(Buffer.from(input.body, "utf8").toString("base64"));
+  const attachments = input.attachments ?? [];
+
+  if (!attachments.length) {
+    return [
+      ...headers,
+      'Content-Type: text/plain; charset="UTF-8"',
+      "Content-Transfer-Encoding: base64",
+      "",
+      bodyBase64,
+    ].join("\r\n");
+  }
+
+  const boundary = `----octomail-${randomHex()}`;
+  const attachmentPayloads = attachments.map((attachment) => wrapBase64(attachment.content.toString("base64")));
+
+  // A boundary appearing inside a part would silently truncate the message at
+  // the receiving end. At 128 bits of randomness this cannot happen by
+  // accident; the check turns a corrupt send into a refused one.
+  for (const payload of [bodyBase64, ...attachmentPayloads, input.body, input.subject]) {
+    if (payload.includes(boundary)) {
+      throw new Error("Generated MIME boundary collides with message content; refusing to build a corrupt message.");
+    }
+  }
+
+  const parts = [
+    ['Content-Type: text/plain; charset="UTF-8"', "Content-Transfer-Encoding: base64", "", bodyBase64].join("\r\n"),
+    ...attachments.map((attachment, index) =>
+      [
+        `Content-Type: ${attachment.mimeType}`,
+        `Content-Disposition: attachment; ${encodeFilenameParameter(attachment.filename)}`,
+        "Content-Transfer-Encoding: base64",
+        "",
+        attachmentPayloads[index],
+      ].join("\r\n"),
+    ),
+  ];
+
+  return [
+    ...headers,
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    "",
+    ...parts.map((part) => `--${boundary}\r\n${part}`),
+    `--${boundary}--`,
+  ].join("\r\n");
+}
+
+export function buildMimeMessage(input: MimeMessageInput, randomHex?: () => string): string {
+  const raw = buildMimeString(input, randomHex);
+  const size = Buffer.byteLength(raw, "utf8");
+
+  if (size > MAX_MESSAGE_BYTES) {
+    throw new Error(
+      `Encoded message is ${size} bytes, over Gmail's ${MAX_MESSAGE_BYTES}-byte simple-upload limit. Sending a message this large needs resumable upload, which Octomail does not implement. Nothing was created.`,
+    );
+  }
+
+  return Buffer.from(raw, "utf8").toString("base64url");
 }
