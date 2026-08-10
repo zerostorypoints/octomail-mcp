@@ -23,6 +23,7 @@ export type RawAccountEntry = {
   tokenPath?: string;
   label?: string;
   email?: string;
+  allowedRecipients?: string[];
 };
 
 export type RawAccountsConfig = {
@@ -33,6 +34,7 @@ export type AccountConfig = {
   tokenPath: string;
   label?: string;
   email?: string;
+  allowedRecipients?: string[];
 };
 
 export type AccountsConfig = {
@@ -45,6 +47,10 @@ export type OAuthCredentials = {
 };
 
 const ALIAS_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
+// Entries are either a full address or "@domain". Empty or absent means
+// the account cannot send at all — the fail-closed default.
+const ALLOWLIST_ENTRY = /^[A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 
 export function expandPath(value: string): string {
   if (value === "~") {
@@ -90,7 +96,7 @@ export function assertValidAlias(alias: string): void {
   }
 }
 
-function validateRawConfig(parsed: unknown, configPath: string): RawAccountsConfig {
+export function validateRawConfig(parsed: unknown, configPath: string): RawAccountsConfig {
   const shapeError = `Invalid accounts config at ${configPath}. Expected {"accounts": {...}}.`;
   if (typeof parsed !== "object" || parsed === null || !("accounts" in parsed)) {
     throw new Error(shapeError);
@@ -113,6 +119,30 @@ function validateRawConfig(parsed: unknown, configPath: string): RawAccountsConf
     for (const field of ["tokenPath", "label", "email"] as const) {
       if (value[field] !== undefined && typeof value[field] !== "string") {
         throw new Error(`Invalid "${field}" for account "${alias}". Expected a string.`);
+      }
+    }
+
+    if (value.allowedRecipients !== undefined) {
+      if (!Array.isArray(value.allowedRecipients)) {
+        throw new Error(
+          `Invalid "allowedRecipients" for account "${alias}". Expected an array of addresses such as ["@example.com", "person@example.com"].`,
+        );
+      }
+
+      for (const recipient of value.allowedRecipients) {
+        if (typeof recipient !== "string") {
+          throw new Error(`Invalid allowedRecipients entry for account "${alias}". Expected a string.`);
+        }
+        if (!/^[\x21-\x7e]+$/.test(recipient)) {
+          throw new Error(
+            `allowedRecipients entry "${recipient}" for account "${alias}" contains non-ASCII characters. Use ASCII only — a non-ASCII domain cannot be distinguished from a homograph.`,
+          );
+        }
+        if (!ALLOWLIST_ENTRY.test(recipient)) {
+          throw new Error(
+            `allowedRecipients entry "${recipient}" for account "${alias}" is not a full address or an "@domain" entry.`,
+          );
+        }
       }
     }
 
@@ -144,6 +174,7 @@ export function resolveAccount(alias: string, entry: RawAccountEntry): AccountCo
     tokenPath: entry.tokenPath ? expandPath(entry.tokenPath) : defaultTokenPath(alias),
     label: entry.label,
     email: entry.email,
+    allowedRecipients: entry.allowedRecipients,
   };
 }
 

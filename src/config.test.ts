@@ -12,6 +12,7 @@ import {
   loadRawAccountsConfig,
   saveAccountsConfig,
   setAccountEmail,
+  validateRawConfig,
 } from "./config.js";
 
 let workDir: string;
@@ -134,4 +135,38 @@ test("ensureAccount does not rewrite a tilde tokenPath into an absolute path whe
   const onDisk = JSON.parse(fs.readFileSync(path.join(workDir, "accounts.json"), "utf8"));
   assert.equal(onDisk.accounts.work.tokenPath, "~/x.json");
   assert.equal(onDisk.accounts.work.label, "New Label");
+});
+
+test("validateRawConfig accepts an allowedRecipients list", () => {
+  const config = validateRawConfig(
+    { accounts: { work: { allowedRecipients: ["@example.com", "a@b.pl"] } } },
+    "test.json",
+  );
+  assert.deepEqual(config.accounts.work.allowedRecipients, ["@example.com", "a@b.pl"]);
+});
+
+test("validateRawConfig accepts an account with no allowedRecipients", () => {
+  const config = validateRawConfig({ accounts: { work: {} } }, "test.json");
+  assert.equal(config.accounts.work.allowedRecipients, undefined);
+});
+
+test("validateRawConfig rejects allowedRecipients that is not an array", () => {
+  assert.throws(
+    () => validateRawConfig({ accounts: { work: { allowedRecipients: "@example.com" } } }, "test.json"),
+    /allowedRecipients/,
+  );
+});
+
+test("validateRawConfig rejects a malformed allowlist entry", () => {
+  assert.throws(
+    () => validateRawConfig({ accounts: { work: { allowedRecipients: ["example.com"] } } }, "test.json"),
+    /example\.com/,
+  );
+});
+
+test("validateRawConfig rejects a non-ASCII allowlist entry", () => {
+  assert.throws(
+    () => validateRawConfig({ accounts: { work: { allowedRecipients: ["@ex\u0430mple.com"] } } }, "test.json"),
+    /ASCII/i,
+  );
 });
