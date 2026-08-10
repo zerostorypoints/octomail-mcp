@@ -127,3 +127,60 @@ test("a benign address alongside a decorated hostile one: both are extracted and
     "overall verdict must be refused when any recipient is refused",
   );
 });
+
+test("extractAddresses closes the space-before-@ bypass and the address is refused", () => {
+  const found = extractAddresses("evil @attacker.com");
+  assert.deepEqual(found, ["evil@attacker.com"]);
+  assert.equal(checkRecipients(found, ["@ok.com"]).every((v) => v.allowed), false);
+});
+
+test("extractAddresses closes the space-after-@ bypass and the address is refused", () => {
+  const found = extractAddresses("evil@ attacker.com");
+  assert.deepEqual(found, ["evil@attacker.com"]);
+  assert.equal(checkRecipients(found, ["@ok.com"]).every((v) => v.allowed), false);
+});
+
+test("a benign address alongside a space-decorated hostile one: both are extracted and the send is refused", () => {
+  const found = extractAddresses("allowed@ok.com, evil @attacker.com");
+  assert.deepEqual(found.sort(), ["allowed@ok.com", "evil@attacker.com"]);
+  const verdicts = checkRecipients(found, ["@ok.com"]);
+  assert.equal(verdicts.length, 2);
+  assert.equal(
+    verdicts.length > 0 && verdicts.every((v) => v.allowed),
+    false,
+    "overall verdict must be refused when the hostile recipient rides along",
+  );
+});
+
+test("a benign angle-bracket address alongside a space-decorated hostile angle-bracket one: both are extracted and the send is refused", () => {
+  const found = extractAddresses("Good <allowed@ok.com>, Bad <evil @attacker.com>");
+  assert.deepEqual(found.sort(), ["allowed@ok.com", "evil@attacker.com"]);
+  const verdicts = checkRecipients(found, ["@ok.com"]);
+  assert.equal(verdicts.length, 2);
+  assert.equal(
+    verdicts.length > 0 && verdicts.every((v) => v.allowed),
+    false,
+    "overall verdict must be refused when the hostile recipient rides along",
+  );
+});
+
+test("extractAddresses throws rather than silently dropping an @ no token can claim", () => {
+  const value = "allowed@ok.com, evil,@attacker.com";
+  assert.throws(() => extractAddresses(value), (err: unknown) => {
+    assert.ok(err instanceof Error);
+    assert.match(err.message, /could not be parsed safely/);
+    assert.ok(err.message.includes(value), `expected message to quote the offending value: ${err.message}`);
+    return true;
+  });
+});
+
+test("normalising @ spacing does not break an ordinary bare address", () => {
+  assert.deepEqual(extractAddresses("alice@example.com"), ["alice@example.com"]);
+  assert.equal(allowed(["alice@example.com"]), true);
+});
+
+test("normalising @ spacing does not break an ordinary Name <addr> pair", () => {
+  const found = extractAddresses("Alice <alice@example.com>");
+  assert.deepEqual(found, ["alice@example.com"]);
+  assert.equal(allowed(found), true);
+});
