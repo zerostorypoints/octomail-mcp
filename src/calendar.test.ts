@@ -1,23 +1,26 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AUTH_SCOPES, CALENDAR_SCOPE, GMAIL_SCOPES, describeMissingCalendarScope } from "./gmail.js";
+import { AUTH_SCOPES, CALENDAR_EVENTS_SCOPE, CALENDAR_SCOPE, GMAIL_SCOPES, describeMissingCalendarScope } from "./gmail.js";
 import { calendarEventsRequest, summarizeEvent } from "./calendar.js";
 
 test("CALENDAR_SCOPE is the read-only calendar scope", () => {
   assert.equal(CALENDAR_SCOPE, "https://www.googleapis.com/auth/calendar.readonly");
 });
 
-test("AUTH_SCOPES keeps every Gmail scope and adds calendar", () => {
+test("AUTH_SCOPES keeps every Gmail scope and adds both calendar scopes", () => {
   for (const scope of GMAIL_SCOPES) {
     assert.ok(AUTH_SCOPES.includes(scope), `${scope} missing from AUTH_SCOPES`);
   }
   assert.ok(AUTH_SCOPES.includes(CALENDAR_SCOPE));
-  assert.equal(AUTH_SCOPES.length, GMAIL_SCOPES.length + 1);
+  assert.ok(AUTH_SCOPES.includes(CALENDAR_EVENTS_SCOPE));
+  assert.equal(AUTH_SCOPES.length, GMAIL_SCOPES.length + 2);
 });
 
-test("AUTH_SCOPES grants no write access to calendars", () => {
+test("AUTH_SCOPES grants no calendar-admin access (create/delete calendars, ACLs)", () => {
+  // Exact equality, not endsWith("/calendar") — calendar.events legitimately
+  // ends in a longer string containing "calendar", and a substring/suffix
+  // check would false-fail the moment that scope was added.
   assert.ok(!AUTH_SCOPES.some((s) => s === "https://www.googleapis.com/auth/calendar"));
-  assert.ok(!AUTH_SCOPES.some((s) => s.endsWith("/calendar.events")));
 });
 
 test("describeMissingCalendarScope names the account and the re-auth command", () => {

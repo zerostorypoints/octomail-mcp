@@ -89,6 +89,7 @@ You have three options, in order of convenience:
 | `gmail.compose` | Create drafts |
 | `gmail.settings.basic` | List, create, and delete filters |
 | `calendar.readonly` | List calendars and events |
+| `calendar.events` | Requested for a planned future feature (busy-block sync between calendars); no registered tool uses it yet |
 
 There is deliberately **no tool that sends mail or deletes a message**. But
 `TRASH` and `SPAM` are ordinary Gmail labels, and adding either one — via

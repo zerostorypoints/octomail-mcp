@@ -14,6 +14,11 @@ export const GMAIL_SCOPES = [
 
 export const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 
+// Requested now so accounts need only one manual re-consent: the upcoming
+// busy-block sync writes events. No write tool is registered yet — a scope
+// grants nothing on its own, only a registered tool can act on it.
+export const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+
 // Scopes requested on the consent screen. Gmail scopes stay grouped in
 // GMAIL_SCOPES so mail code can reason about them alone; the consent screen
 // asks for everything Octomail can use.
@@ -21,7 +26,11 @@ export const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly
 // Typed as readonly string[] rather than `as const`: with a literal tuple
 // type, a test asserting a scope is ABSENT ("no overlap between these types")
 // fails to compile instead of failing as an assertion.
-export const AUTH_SCOPES: readonly string[] = [...GMAIL_SCOPES, CALENDAR_SCOPE];
+//
+// calendar.events is listed alongside calendar.readonly, not instead of it:
+// calendarList.list requires calendar.readonly on its own — calendar.events
+// alone does not cover it — so the read tools still need both scopes.
+export const AUTH_SCOPES: readonly string[] = [...GMAIL_SCOPES, CALENDAR_SCOPE, CALENDAR_EVENTS_SCOPE];
 
 export function createOAuthClient(redirectUri = "http://127.0.0.1"): OAuth2Client {
   const credentials = loadOAuthCredentials();

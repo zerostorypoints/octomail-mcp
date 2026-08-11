@@ -11,8 +11,12 @@ This MCP server talks to the Gmail API on your behalf using these OAuth scopes:
 | `gmail.compose` | Create drafts, and send them via `gmail_send_draft` — this scope has always granted send |
 | `gmail.settings.basic` | List, create, and delete filters |
 | `calendar.readonly` | List calendars and events |
+| `calendar.events` | Requested for a planned future feature (busy-block sync between calendars); no registered tool uses it yet |
 
-No tool can create, change, or delete a calendar event — the scope is read-only.
+No registered tool can create, change, or delete a calendar event. `calendar.events` is
+requested on the consent screen so accounts won't need a second manual re-authorization
+once the write tool ships, but a granted scope does nothing by itself — only a
+registered tool that calls it can act, and none does today.
 
 `gmail.compose` grants send, and every account has held it since it first
 authorized — a token holder could always send mail through the Gmail API,
