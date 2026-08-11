@@ -120,7 +120,7 @@ spam, and deletion actions unless the call carries an explicit
 - `gmail_delete_filter(account, filterId, confirm?)`
 - `gmail_backfill_filter(account, filterId, apply?, maxResults?, pageToken?, confirm?)`
 - `calendar_list_calendars(account)`
-- `calendar_list_events(account, calendarId?, timeMin, timeMax, maxResults?)`
+- `calendar_list_events(account, calendarId?, timeMin, timeMax, maxResults?)` — returns title, time, location, and attendee count, but omits the event description (typically auto-pasted conference meeting IDs and access codes)
 
 ## Documentation
 

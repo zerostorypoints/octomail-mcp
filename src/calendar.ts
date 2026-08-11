@@ -16,11 +16,13 @@ export function summarizeEvent(event: calendar_v3.Schema$Event) {
   // there is no explicit flag, so callers would otherwise each re-derive it.
   const allDay = Boolean(event.start?.date && !event.start?.dateTime);
 
+  // Note: description is intentionally omitted. In practice, event descriptions
+  // are often auto-pasted conference details (meeting IDs, access codes, long URLs
+  // with tokens), which add ballast to the list view without value for scheduling.
   return {
     id: event.id ?? undefined,
     status: event.status ?? undefined,
     summary: event.summary ?? undefined,
-    description: event.description ?? undefined,
     location: event.location ?? undefined,
     start: {
       dateTime: event.start?.dateTime ?? undefined,

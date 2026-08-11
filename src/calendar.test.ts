@@ -95,3 +95,17 @@ test("calendarEventsRequest passes through an explicit calendar and limit", () =
   assert.equal(request.calendarId, "team@group.calendar.google.com");
   assert.equal(request.maxResults, 5);
 });
+
+test("summarizeEvent omits description even when event contains it", () => {
+  const summary = summarizeEvent({
+    id: "evt_with_desc",
+    summary: "Team standup",
+    description: "https://zoom.us/j/123456789?pwd=abc123def456ghi789jklmnopqrst==\n\nMeeting ID: 123 456 789\nAccess Code: 987654",
+    start: { dateTime: "2026-08-12T10:00:00Z" },
+    end: { dateTime: "2026-08-12T10:30:00Z" },
+  });
+
+  assert.equal(summary.id, "evt_with_desc");
+  assert.equal(summary.summary, "Team standup");
+  assert.equal("description" in summary, false);
+});
