@@ -47,6 +47,17 @@ export function assertCalendarScope(account: string): void {
   }
 }
 
+async function withCalendarScopeErrors<T>(account: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (isScopeInsufficientError(error)) {
+      throw new Error(describeMissingCalendarScope(account));
+    }
+    throw error;
+  }
+}
+
 export function calendarEventsRequest(input: {
   calendarId?: string;
   timeMin: string;
@@ -73,7 +84,7 @@ export function registerCalendarTools(server: McpServer): void {
     async ({ account }) =>
       safeTool(async () => {
         assertCalendarScope(account);
-        try {
+        return await withCalendarScopeErrors(account, async () => {
           const calendar = await calendarForAccount(account);
           const response = await calendar.calendarList.list();
           return (response.data.items ?? []).map((item) => ({
@@ -83,12 +94,7 @@ export function registerCalendarTools(server: McpServer): void {
             accessRole: item.accessRole ?? undefined,
             timeZone: item.timeZone ?? undefined,
           }));
-        } catch (error) {
-          if (isScopeInsufficientError(error)) {
-            throw new Error(describeMissingCalendarScope(account));
-          }
-          throw error;
-        }
+        });
       }, account),
   );
 
@@ -105,18 +111,13 @@ export function registerCalendarTools(server: McpServer): void {
     async ({ account, calendarId, timeMin, timeMax, maxResults }) =>
       safeTool(async () => {
         assertCalendarScope(account);
-        try {
+        return await withCalendarScopeErrors(account, async () => {
           const calendar = await calendarForAccount(account);
           const response = await calendar.events.list(
             calendarEventsRequest({ calendarId, timeMin, timeMax, maxResults }),
           );
           return (response.data.items ?? []).map(summarizeEvent);
-        } catch (error) {
-          if (isScopeInsufficientError(error)) {
-            throw new Error(describeMissingCalendarScope(account));
-          }
-          throw error;
-        }
+        });
       }, account),
   );
 }

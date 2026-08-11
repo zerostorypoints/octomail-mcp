@@ -4,11 +4,16 @@ This server talks to Gmail through your own Google Cloud project. You create the
 project once, then every account you add authorizes against it. Nothing here is
 Gmail-account-specific until the "Test users" step below.
 
-## 1. Create a project and enable the Gmail API
+## 1. Create a project and enable the Gmail API and Calendar API
 
 Open the [Google Cloud Console](https://console.cloud.google.com/) and create a
 new project (or pick an existing one you're comfortable using). Then go to
-**APIs & Services > Library**, search for "Gmail API", and enable it.
+**APIs & Services > Library**, search for "Gmail API", and enable it. The
+Google Calendar API is a separate library entry in the same project — search
+for "Google Calendar API" and enable it too. Until it's enabled, the calendar
+tools fail with Google's `SERVICE_DISABLED` / `accessNotConfigured` 403.
+`calendar.readonly` must also be listed among the scopes on the OAuth consent
+screen's scope configuration (step 2 below).
 
 ## 2. Configure the OAuth consent screen
 
@@ -83,6 +88,7 @@ You have three options, in order of convenience:
 | `gmail.modify` | Apply and remove labels, archive messages — including adding `TRASH`/`SPAM`, which trashes or spams a message |
 | `gmail.compose` | Create drafts |
 | `gmail.settings.basic` | List, create, and delete filters |
+| `calendar.readonly` | List calendars and events |
 
 There is deliberately **no tool that sends mail or deletes a message**. But
 `TRASH` and `SPAM` are ordinary Gmail labels, and adding either one — via

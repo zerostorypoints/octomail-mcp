@@ -119,6 +119,8 @@ spam, and deletion actions unless the call carries an explicit
 - `gmail_create_filter(account, from?, to?, subject?, query?, negatedQuery?, hasAttachment?, excludeChats?, size?, sizeComparison?, addLabelNames?, removeLabelNames?, forward?, confirm?)`
 - `gmail_delete_filter(account, filterId, confirm?)`
 - `gmail_backfill_filter(account, filterId, apply?, maxResults?, pageToken?, confirm?)`
+- `calendar_list_calendars(account)`
+- `calendar_list_events(account, calendarId?, timeMin, timeMax, maxResults?)`
 
 ## Documentation
 
