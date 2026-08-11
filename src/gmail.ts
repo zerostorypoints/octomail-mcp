@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { google, gmail_v1 } from "googleapis";
+import { google, gmail_v1, calendar_v3 } from "googleapis";
 import { Credentials, OAuth2Client } from "google-auth-library";
 import { getAccountConfig, loadOAuthCredentials } from "./config.js";
 
@@ -11,6 +11,17 @@ export const GMAIL_SCOPES = [
   "https://www.googleapis.com/auth/gmail.compose",
   FILTER_SCOPE,
 ] as const;
+
+export const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+
+// Scopes requested on the consent screen. Gmail scopes stay grouped in
+// GMAIL_SCOPES so mail code can reason about them alone; the consent screen
+// asks for everything Octomail can use.
+//
+// Typed as readonly string[] rather than `as const`: with a literal tuple
+// type, a test asserting a scope is ABSENT ("no overlap between these types")
+// fails to compile instead of failing as an assertion.
+export const AUTH_SCOPES: readonly string[] = [...GMAIL_SCOPES, CALENDAR_SCOPE];
 
 export function createOAuthClient(redirectUri = "http://127.0.0.1"): OAuth2Client {
   const credentials = loadOAuthCredentials();
@@ -33,6 +44,13 @@ export async function gmailForAccount(account: string): Promise<gmail_v1.Gmail> 
   const oauth2Client = createOAuthClient();
   oauth2Client.setCredentials(token);
   return google.gmail({ version: "v1", auth: oauth2Client });
+}
+
+export async function calendarForAccount(account: string): Promise<calendar_v3.Calendar> {
+  const token = readAccountToken(account);
+  const oauth2Client = createOAuthClient();
+  oauth2Client.setCredentials(token);
+  return google.calendar({ version: "v3", auth: oauth2Client });
 }
 
 export async function listLabelsByName(gmail: gmail_v1.Gmail): Promise<Map<string, string>> {
@@ -284,5 +302,13 @@ export function describeMissingFilterScope(account: string): string {
     `Gmail account "${account}" was authorized before Octomail requested filter access.`,
     `Run:\n  npm run auth -- --account ${account}\n`,
     "and approve the new permission. Label, search, and draft tools keep working meanwhile.",
+  ].join(" ");
+}
+
+export function describeMissingCalendarScope(account: string): string {
+  return [
+    `Gmail account "${account}" was authorized before Octomail requested calendar access.`,
+    `Run:\n  npm run auth -- --account ${account}\n`,
+    "and approve the new permission. Mail tools keep working meanwhile.",
   ].join(" ");
 }

@@ -4,7 +4,7 @@ import http from "node:http";
 import path from "node:path";
 import process from "node:process";
 import { ensureAccount, setAccountEmail } from "./config.js";
-import { createOAuthClient, GMAIL_SCOPES } from "./gmail.js";
+import { createOAuthClient, AUTH_SCOPES } from "./gmail.js";
 import { google } from "googleapis";
 
 export type AuthorizeResult = {
@@ -101,7 +101,7 @@ export async function authorizeAccount(
   const authorizeUrl = oauth2Client.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
-    scope: [...GMAIL_SCOPES],
+    scope: [...AUTH_SCOPES],
   });
 
   console.log(`\nAuthorize account "${alias}" in your browser:\n`);
