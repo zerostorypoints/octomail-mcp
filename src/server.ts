@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { registerAttachmentTools } from "./attachments.js";
+import { registerCalendarTools } from "./calendar.js";
 import { loadAccountsConfig } from "./config.js";
 import { registerDraftTools } from "./drafts.js";
 import { registerFilterTools } from "./filters.js";
@@ -213,6 +214,7 @@ registerLabelTools(server);
 registerFilterTools(server);
 registerAttachmentTools(server);
 registerDraftTools(server);
+registerCalendarTools(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

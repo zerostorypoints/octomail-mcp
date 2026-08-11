@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AUTH_SCOPES, CALENDAR_SCOPE, GMAIL_SCOPES, describeMissingCalendarScope } from "./gmail.js";
-import { summarizeEvent } from "./calendar.js";
+import { calendarEventsRequest, summarizeEvent } from "./calendar.js";
 
 test("CALENDAR_SCOPE is the read-only calendar scope", () => {
   assert.equal(CALENDAR_SCOPE, "https://www.googleapis.com/auth/calendar.readonly");
@@ -70,4 +70,25 @@ test("summarizeEvent survives a nearly empty event", () => {
 test("summarizeEvent keeps cancellation visible", () => {
   const summary = summarizeEvent({ id: "evt3", status: "cancelled", start: { date: "2026-08-15" } });
   assert.equal(summary.status, "cancelled");
+});
+
+test("calendarEventsRequest defaults to the primary calendar and expands recurrences", () => {
+  const request = calendarEventsRequest({ timeMin: "2026-08-12T00:00:00Z", timeMax: "2026-08-13T00:00:00Z" });
+  assert.equal(request.calendarId, "primary");
+  assert.equal(request.singleEvents, true);
+  assert.equal(request.orderBy, "startTime");
+  assert.equal(request.maxResults, 50);
+  assert.equal(request.timeMin, "2026-08-12T00:00:00Z");
+  assert.equal(request.timeMax, "2026-08-13T00:00:00Z");
+});
+
+test("calendarEventsRequest passes through an explicit calendar and limit", () => {
+  const request = calendarEventsRequest({
+    calendarId: "team@group.calendar.google.com",
+    timeMin: "2026-08-12T00:00:00Z",
+    timeMax: "2026-08-19T00:00:00Z",
+    maxResults: 5,
+  });
+  assert.equal(request.calendarId, "team@group.calendar.google.com");
+  assert.equal(request.maxResults, 5);
 });
