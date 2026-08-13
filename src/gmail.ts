@@ -190,6 +190,13 @@ export function summarizeMessage(message: gmail_v1.Schema$Message) {
       date: messageHeader(message, "Date"),
       messageId: messageHeader(message, "Message-ID"),
       references: messageHeader(message, "References"),
+      // The header that separates bulk mail from a message written to you: a
+      // newsletter addressed to your own address is otherwise indistinguishable
+      // from a colleague writing directly.
+      listUnsubscribe: messageHeader(message, "List-Unsubscribe"),
+      // Gmail's own basis for "to me": it survives Bcc and list delivery, where
+      // the recipient's address appears in no visible header.
+      deliveredTo: messageHeader(message, "Delivered-To"),
     },
     bodyText: textBodies.join("\n\n").trim() || undefined,
     bodyHtml: htmlBodies.join("\n\n").trim() || undefined,

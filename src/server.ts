@@ -30,7 +30,12 @@ async function searchAccount(account: string, query: string, maxResults: number)
         userId: "me",
         id: message.id ?? "",
         format: "metadata",
-        metadataHeaders: ["From", "To", "Subject", "Date"],
+        // Gmail returns only the headers named here, so anything summarizeMessage
+        // projects but this list omits comes back undefined on every search
+        // result — and a caller cannot tell an absent header from an
+        // unrequested one. Cc and Delivered-To answer "was this written to me,
+        // or was I one of many"; List-Unsubscribe answers "is this bulk mail".
+        metadataHeaders: ["From", "To", "Cc", "Subject", "Date", "Delivered-To", "List-Unsubscribe"],
       });
       return summarizeMessage(detail.data);
     }),
