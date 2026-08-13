@@ -59,6 +59,38 @@ test("summarizeEvent reports a timed event as not all-day", () => {
   assert.equal(summary.attendeeCount, 2);
 });
 
+test("summarizeEvent surfaces this calendar's own answer to the invitation", () => {
+  const summary = summarizeEvent({
+    id: "evt_invite",
+    start: { dateTime: "2026-08-14T09:00:00+02:00" },
+    end: { dateTime: "2026-08-14T10:00:00+02:00" },
+    attendees: [
+      { email: "organizer@example.com", responseStatus: "accepted", organizer: true },
+      { email: "me@example.com", responseStatus: "needsAction", self: true },
+    ],
+  });
+
+  assert.equal(summary.myResponseStatus, "needsAction");
+});
+
+test("summarizeEvent leaves the own answer undefined when there are no attendees", () => {
+  assert.equal(summarizeEvent({ id: "solo", start: { date: "2026-08-15" } }).myResponseStatus, undefined);
+});
+
+test("summarizeEvent keeps Google's own event kind and free/busy setting", () => {
+  const summary = summarizeEvent({
+    id: "evt_focus",
+    summary: "Cokolwiek uzytkownik wpisal",
+    eventType: "focusTime",
+    transparency: "transparent",
+    start: { dateTime: "2026-08-14T09:00:00+02:00" },
+    end: { dateTime: "2026-08-14T11:00:00+02:00" },
+  });
+
+  assert.equal(summary.eventType, "focusTime");
+  assert.equal(summary.transparency, "transparent");
+});
+
 test("summarizeEvent reports a date-only event as all-day", () => {
   const summary = summarizeEvent({
     id: "evt2",

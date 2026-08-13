@@ -40,6 +40,17 @@ export function summarizeEvent(event: calendar_v3.Schema$Event) {
     allDay,
     organizer: event.organizer?.email ?? undefined,
     attendeeCount: event.attendees?.length ?? undefined,
+    // Odpowiedz tego kalendarza na zaproszenie: bez niej z listy nie widac,
+    // ktore zaproszenia czekaja na decyzje. Tu `self` jest wlasciwe — projekcja
+    // opisuje kopie zdarzenia z kalendarza, o ktory pytano. (Do *zapisu*
+    // odpowiedzi samo `self` nie wystarcza; patrz findOwnAttendee.)
+    myResponseStatus: event.attendees?.find((attendee) => attendee.self === true)?.responseStatus ?? undefined,
+    // Google's own answers to two questions a caller would otherwise guess at
+    // from the title: what kind of block this is (native Focus time and
+    // Out-of-office keep their eventType however the user renames them), and
+    // whether it occupies time at all ("transparent" is Show as: Free).
+    eventType: event.eventType ?? undefined,
+    transparency: event.transparency ?? undefined,
     hangoutLink: event.hangoutLink ?? undefined,
     htmlLink: event.htmlLink ?? undefined,
     recurringEventId: event.recurringEventId ?? undefined,
