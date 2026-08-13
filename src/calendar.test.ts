@@ -1,7 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AUTH_SCOPES, CALENDAR_EVENTS_SCOPE, CALENDAR_SCOPE, GMAIL_SCOPES, describeMissingCalendarScope } from "./gmail.js";
-import { calendarEventsRequest, summarizeEvent } from "./calendar.js";
+import type { calendar_v3 } from "googleapis";
+import {
+  calendarEventsRequest,
+  findOwnAttendee,
+  isPreconditionFailedError,
+  missingCalendarWriteScope,
+  respondToEvent,
+  rsvpAttendees,
+  summarizeEvent,
+} from "./calendar.js";
 
 test("CALENDAR_SCOPE is the read-only calendar scope", () => {
   assert.equal(CALENDAR_SCOPE, "https://www.googleapis.com/auth/calendar.readonly");
@@ -108,4 +117,289 @@ test("summarizeEvent omits description even when event contains it", () => {
   assert.equal(summary.id, "evt_with_desc");
   assert.equal(summary.summary, "Team standup");
   assert.equal("description" in summary, false);
+});
+
+// --- RSVP -------------------------------------------------------------------
+
+const SELF = "me@example.com";
+
+const invited: calendar_v3.Schema$Event = {
+  id: "evt_rsvp",
+  etag: '"3181161784712000"',
+  summary: "Kickoff",
+  location: "Warszawa, Prosta 51",
+  start: { dateTime: "2026-08-14T10:00:00+02:00" },
+  end: { dateTime: "2026-08-14T11:00:00+02:00" },
+  organizer: { email: "organizer@example.com" },
+  attendees: [
+    { email: "organizer@example.com", responseStatus: "accepted", organizer: true },
+    { email: "me@example.com", responseStatus: "needsAction", self: true },
+    { email: "other@example.com", responseStatus: "tentative", comment: "moge sie spoznic" },
+  ],
+};
+
+function fakeCalendar(event: calendar_v3.Schema$Event | Error) {
+  const calls: { get: unknown[]; patch: { params: any; options?: any }[] } = { get: [], patch: [] };
+  const client = {
+    events: {
+      async get(params: any) {
+        calls.get.push(params);
+        if (event instanceof Error) {
+          throw event;
+        }
+        // Google hands back a fresh object per call; hand back a copy so a test
+        // cannot pass by mutating the fixture in place.
+        return { data: structuredClone(event) };
+      },
+      async patch(params: any, options?: any) {
+        calls.patch.push({ params, options });
+        return { data: { ...structuredClone(event as calendar_v3.Schema$Event), ...params.requestBody } };
+      },
+    },
+  };
+  return { client, calls };
+}
+
+test("rsvpAttendees answers only for this account's own entry", () => {
+  const before = structuredClone(invited.attendees!);
+  const attendees = rsvpAttendees(invited.attendees, SELF, "accepted", undefined);
+
+  assert.equal(attendees[1].responseStatus, "accepted");
+  assert.equal(attendees[1].email, SELF);
+  // Everyone else survives byte-identical, including their own answers. Compared
+  // against a copy taken beforehand: the returned entries are the same objects,
+  // so comparing them with the fixture would compare each object with itself.
+  assert.deepEqual(attendees[0], before[0]);
+  assert.deepEqual(attendees[2], before[2]);
+});
+
+test("rsvpAttendees records a decline the same way", () => {
+  const attendees = rsvpAttendees(invited.attendees, SELF, "declined", undefined);
+  assert.equal(attendees[1].responseStatus, "declined");
+});
+
+test("rsvpAttendees attaches a comment to this account's entry only", () => {
+  const attendees = rsvpAttendees(invited.attendees, SELF, "tentative", "oddzwonie w poniedzialek");
+
+  assert.equal(attendees[1].comment, "oddzwonie w poniedzialek");
+  assert.equal(attendees[2].comment, "moge sie spoznic");
+});
+
+test("rsvpAttendees without a comment leaves an existing one untouched", () => {
+  const withComment = [{ email: SELF, self: true, responseStatus: "needsAction", comment: "stary" }];
+  const attendees = rsvpAttendees(withComment, SELF, "accepted", undefined);
+  assert.equal(attendees[0].comment, "stary");
+});
+
+test("findOwnAttendee refuses an event the account is not invited to", () => {
+  assert.throws(
+    () => findOwnAttendee([{ email: "someone@example.com", self: true, responseStatus: "accepted" }], SELF),
+    /not an attendee/i,
+  );
+  assert.throws(() => findOwnAttendee(undefined, SELF), /not an attendee/i);
+  assert.throws(() => findOwnAttendee([], SELF), /not an attendee/i);
+});
+
+test("findOwnAttendee matches the address regardless of case and padding", () => {
+  const attendees = [{ email: "organizer@example.com" }, { email: " Me@Example.com ", self: true }];
+  assert.equal(findOwnAttendee(attendees, SELF), 1);
+});
+
+test("findOwnAttendee refuses a copy of the event that belongs to another calendar", () => {
+  // A shared calendar the account can write to: Google marks the calendar
+  // owner as `self`, and the account's own entry carries no `self` at all.
+  // Answering by `self` here would rewrite the owner's answer.
+  const shared = [
+    { email: "boss@example.com", self: true, responseStatus: "accepted" },
+    { email: SELF, responseStatus: "needsAction" },
+  ];
+
+  assert.throws(() => findOwnAttendee(shared, SELF), /another calendar/i);
+});
+
+test("findOwnAttendee refuses an event listing this account twice", () => {
+  const twice = [
+    { email: SELF, self: true, responseStatus: "needsAction" },
+    { email: SELF, self: true, responseStatus: "accepted" },
+  ];
+
+  assert.throws(() => findOwnAttendee(twice, SELF), /more than once/i);
+});
+
+test("respondToEvent patches the attendees field and nothing else", async () => {
+  const { client, calls } = fakeCalendar(invited);
+
+  await respondToEvent(client, { eventId: "evt_rsvp", selfEmail: SELF, response: "accepted" });
+
+  assert.equal(calls.patch.length, 1);
+  const { params } = calls.patch[0];
+  assert.deepEqual(Object.keys(params.requestBody), ["attendees"]);
+  assert.equal(params.calendarId, "primary");
+  assert.equal(params.eventId, "evt_rsvp");
+  assert.equal(params.requestBody.attendees[1].responseStatus, "accepted");
+  // The other guests reach the wire exactly as they were read.
+  assert.deepEqual(params.requestBody.attendees[0], invited.attendees![0]);
+  assert.deepEqual(params.requestBody.attendees[2], invited.attendees![2]);
+});
+
+test("respondToEvent sends no notification mail of its own", async () => {
+  // "all" would mail every guest on the invitation; the answer itself still
+  // reaches the organizer's copy of the event.
+  const { client, calls } = fakeCalendar(invited);
+
+  await respondToEvent(client, { eventId: "evt_rsvp", selfEmail: SELF, response: "declined" });
+
+  assert.equal(calls.patch[0].params.sendUpdates, "none");
+});
+
+test("respondToEvent guards the write with the event etag", async () => {
+  const { client, calls } = fakeCalendar(invited);
+
+  await respondToEvent(client, { eventId: "evt_rsvp", selfEmail: SELF, response: "declined" });
+
+  assert.equal(calls.patch[0].options.headers["If-Match"], '"3181161784712000"');
+});
+
+test("respondToEvent refuses to write an event that came back without an etag", async () => {
+  const { etag, ...noEtag } = invited;
+  const { client, calls } = fakeCalendar(noEtag);
+
+  await assert.rejects(
+    () => respondToEvent(client, { eventId: "evt_rsvp", selfEmail: SELF, response: "accepted" }),
+    /etag/i,
+  );
+  assert.equal(calls.patch.length, 0);
+});
+
+test("respondToEvent explains a lost race instead of leaking a status code", async () => {
+  const { client } = fakeCalendar(invited);
+  client.events.patch = async () => {
+    throw Object.assign(new Error("Request failed with status code 412"), { code: 412 });
+  };
+
+  await assert.rejects(
+    () => respondToEvent(client, { eventId: "evt_rsvp", selfEmail: SELF, response: "accepted" }),
+    /changed while the answer was being prepared/i,
+  );
+});
+
+test("respondToEvent passes an explicit calendar through to both calls", async () => {
+  const { client, calls } = fakeCalendar(invited);
+
+  await respondToEvent(client, {
+    calendarId: "team@group.calendar.google.com",
+    eventId: "evt_rsvp",
+    selfEmail: SELF,
+    response: "tentative",
+  });
+
+  assert.equal((calls.get[0] as any).calendarId, "team@group.calendar.google.com");
+  assert.equal(calls.patch[0].params.calendarId, "team@group.calendar.google.com");
+});
+
+test("respondToEvent on a shared calendar will not answer for its owner", async () => {
+  const boss: calendar_v3.Schema$Event = {
+    id: "evt_boss",
+    etag: '"1"',
+    summary: "Cudze spotkanie",
+    attendees: [
+      { email: "boss@example.com", self: true, responseStatus: "needsAction" },
+      { email: SELF, responseStatus: "accepted" },
+    ],
+  };
+  const { client, calls } = fakeCalendar(boss);
+
+  await assert.rejects(
+    () =>
+      respondToEvent(client, {
+        calendarId: "boss@example.com",
+        eventId: "evt_boss",
+        selfEmail: SELF,
+        response: "declined",
+      }),
+    /another calendar/i,
+  );
+  assert.equal(calls.patch.length, 0);
+});
+
+test("respondToEvent refuses a recurring series and points at the occurrence", async () => {
+  const series: calendar_v3.Schema$Event = {
+    ...invited,
+    id: "evt_series",
+    recurrence: ["RRULE:FREQ=WEEKLY;COUNT=10"],
+  };
+  const { client, calls } = fakeCalendar(series);
+
+  await assert.rejects(
+    () => respondToEvent(client, { eventId: "evt_series", selfEmail: SELF, response: "declined" }),
+    /calendar_list_events/,
+  );
+  assert.equal(calls.patch.length, 0);
+});
+
+test("respondToEvent reports back the stored answer", async () => {
+  const { client } = fakeCalendar(invited);
+
+  const result = await respondToEvent(client, {
+    eventId: "evt_rsvp",
+    selfEmail: SELF,
+    response: "accepted",
+    comment: "bede",
+  });
+
+  assert.equal(result.eventId, "evt_rsvp");
+  assert.equal(result.summary, "Kickoff");
+  assert.equal(result.responseStatus, "accepted");
+  assert.equal(result.attendee, SELF);
+  assert.equal(result.comment, "bede");
+});
+
+test("respondToEvent on an unknown event writes nothing", async () => {
+  const notFound = Object.assign(new Error("Not Found"), { code: 404 });
+  const { client, calls } = fakeCalendar(notFound);
+
+  await assert.rejects(
+    () => respondToEvent(client, { eventId: "brak", selfEmail: SELF, response: "accepted" }),
+    /Not Found/,
+  );
+  assert.equal(calls.patch.length, 0);
+});
+
+test("respondToEvent writes nothing when the account is not an attendee", async () => {
+  const foreign: calendar_v3.Schema$Event = {
+    id: "evt_foreign",
+    etag: '"2"',
+    summary: "Cudze spotkanie",
+    attendees: [{ email: "someone@example.com", self: true, responseStatus: "accepted" }],
+  };
+  const { client, calls } = fakeCalendar(foreign);
+
+  await assert.rejects(
+    () => respondToEvent(client, { eventId: "evt_foreign", selfEmail: SELF, response: "accepted" }),
+    /not an attendee/i,
+  );
+  assert.equal(calls.patch.length, 0);
+});
+
+test("isPreconditionFailedError recognises the shapes googleapis throws", () => {
+  assert.equal(isPreconditionFailedError({ code: 412 }), true);
+  assert.equal(isPreconditionFailedError({ response: { status: 412 } }), true);
+  assert.equal(isPreconditionFailedError({ code: 404 }), false);
+  assert.equal(isPreconditionFailedError(new Error("boom")), false);
+  assert.equal(isPreconditionFailedError(undefined), false);
+});
+
+test("missingCalendarWriteScope names the account when only the read scope was granted", () => {
+  const message = missingCalendarWriteScope({ scope: `${GMAIL_SCOPES[0]} ${CALENDAR_SCOPE}` }, "work");
+  assert.equal(message, describeMissingCalendarScope("work"));
+});
+
+test("missingCalendarWriteScope passes a token that holds the events scope", () => {
+  assert.equal(missingCalendarWriteScope({ scope: `${CALENDAR_SCOPE} ${CALENDAR_EVENTS_SCOPE}` }, "work"), undefined);
+});
+
+test("missingCalendarWriteScope lets Google answer when the token records no scope", () => {
+  // Tokens written before the scope field was persisted read as unknown, not
+  // as missing — same convention the read tools follow.
+  assert.equal(missingCalendarWriteScope({}, "work"), undefined);
 });

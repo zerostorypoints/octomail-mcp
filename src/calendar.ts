@@ -2,13 +2,16 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { calendar_v3 } from "googleapis";
 import { z } from "zod";
 import {
+  CALENDAR_EVENTS_SCOPE,
   CALENDAR_SCOPE,
   calendarForAccount,
   describeMissingCalendarScope,
+  gmailForAccount,
   isScopeInsufficientError,
   readAccountToken,
   tokenHasScope,
 } from "./gmail.js";
+import { getAccountConfig } from "./config.js";
 import { accountShape, safeTool } from "./tools.js";
 
 export function summarizeEvent(event: calendar_v3.Schema$Event) {
@@ -78,6 +81,224 @@ export function calendarEventsRequest(input: {
   };
 }
 
+// Whose invitation this is. `npm run auth` records the address in accounts.json;
+// accounts authorized before that lookup existed fall back to asking Google.
+export async function accountAddress(account: string): Promise<string> {
+  const configured = getAccountConfig(account).email;
+  if (configured) {
+    return configured;
+  }
+
+  const gmail = await gmailForAccount(account);
+  const profile = await gmail.users.getProfile({ userId: "me" });
+  const address = profile.data.emailAddress;
+  if (!address) {
+    throw new Error(
+      `Could not determine the address behind account "${account}", and an invitation can only be answered on behalf of a known address. Run: npm run auth -- --account ${account}`,
+    );
+  }
+  return address;
+}
+
+export const RSVP_RESPONSES = ["accepted", "declined", "tentative"] as const;
+export type RsvpResponse = (typeof RSVP_RESPONSES)[number];
+
+// Returns the re-auth message when the token demonstrably lacks the write
+// scope, and undefined when it holds it or records no scope at all — an
+// unknown scope set is left for Google to answer, as the read tools do.
+export function missingCalendarWriteScope(
+  token: { scope?: string | null },
+  account: string,
+): string | undefined {
+  return tokenHasScope(token, CALENDAR_EVENTS_SCOPE) === false
+    ? describeMissingCalendarScope(account)
+    : undefined;
+}
+
+export function assertCalendarWriteScope(account: string): void {
+  const message = missingCalendarWriteScope(readAccountToken(account), account);
+  if (message) {
+    throw new Error(message);
+  }
+}
+
+// Which attendee entry this account may answer for.
+//
+// `self` alone is not that entry: Google sets it on the attendee whose calendar
+// the copy was read from, so on a shared calendar the account has write access
+// to, `self` is the calendar owner. Answering by `self` there would rewrite
+// someone else's answer. Both conditions have to hold — the entry is the one
+// Google calls ours, and it carries our own address.
+export function findOwnAttendee(
+  attendees: calendar_v3.Schema$EventAttendee[] | undefined,
+  selfEmail: string,
+): number {
+  const list = attendees ?? [];
+  const wanted = selfEmail.trim().toLowerCase();
+  const mine = list
+    .map((attendee, index) => ({ attendee, index }))
+    .filter(({ attendee }) => (attendee.email ?? "").trim().toLowerCase() === wanted);
+
+  if (mine.length === 0) {
+    throw new Error(
+      `This account (${selfEmail}) is not an attendee of that event, so it has no invitation to answer. Nothing was changed.`,
+    );
+  }
+
+  if (mine.length > 1) {
+    throw new Error(
+      `That event lists ${selfEmail} as an attendee more than once, so there is no single answer to record. Nothing was changed — answer it in Google Calendar.`,
+    );
+  }
+
+  const own = mine[0];
+  if (own.attendee.self !== true) {
+    throw new Error(
+      `That copy of the event lives on another calendar, where Google will not accept an answer for ${selfEmail}. Nothing was changed — answer it on this account's own calendar.`,
+    );
+  }
+
+  return own.index;
+}
+
+// The Calendar API has no RSVP endpoint: answering means patching the attendee
+// list, which is a whole-list field. So the list is read, exactly one entry is
+// rewritten, and every other entry is passed back through untouched.
+export function rsvpAttendees(
+  attendees: calendar_v3.Schema$EventAttendee[] | undefined,
+  selfEmail: string,
+  response: RsvpResponse,
+  comment: string | undefined,
+): calendar_v3.Schema$EventAttendee[] {
+  const list = attendees ?? [];
+  const own = findOwnAttendee(list, selfEmail);
+
+  return list.map((attendee, index) =>
+    index === own
+      ? {
+          ...attendee,
+          responseStatus: response,
+          // An absent comment leaves whatever was there; only an explicit one writes.
+          ...(comment === undefined ? {} : { comment }),
+        }
+      : attendee,
+  );
+}
+
+// The slice of calendar_v3.Calendar this path uses. Narrow on purpose: no
+// insert, no delete, no update — the tool cannot reach them even by mistake.
+export interface RsvpCalendarClient {
+  events: {
+    get(params: {
+      calendarId: string;
+      eventId: string;
+    }): Promise<{ data: calendar_v3.Schema$Event }>;
+    patch(
+      params: {
+        calendarId: string;
+        eventId: string;
+        sendUpdates?: string;
+        requestBody: { attendees: calendar_v3.Schema$EventAttendee[] };
+      },
+      options?: { headers: Record<string, string> },
+    ): Promise<{ data: calendar_v3.Schema$Event }>;
+  };
+}
+
+export async function respondToEvent(
+  calendar: RsvpCalendarClient,
+  input: {
+    calendarId?: string;
+    eventId: string;
+    selfEmail: string;
+    response: RsvpResponse;
+    comment?: string;
+  },
+) {
+  const calendarId = input.calendarId ?? "primary";
+  const current = await calendar.events.get({ calendarId, eventId: input.eventId });
+
+  // A master id answers for every occurrence at once; the ids handed out by
+  // calendar_list_events are single occurrences, because it expands series.
+  // Refusing keeps the two from being confused silently.
+  if (current.data.recurrence && current.data.recurrence.length > 0) {
+    throw new Error(
+      "That id is a recurring series, not one occurrence, and answering it would answer every occurrence. Nothing was changed — call calendar_list_events for the day in question and use the id it returns.",
+    );
+  }
+
+  const own = findOwnAttendee(current.data.attendees, input.selfEmail);
+  const attendees = rsvpAttendees(current.data.attendees, input.selfEmail, input.response, input.comment);
+
+  // The whole attendee list is written back, so a blind write would reinstate
+  // it as it looked a moment ago. Without an etag to guard that, the write is
+  // refused rather than sent unguarded.
+  const etag = current.data.etag;
+  if (!etag) {
+    throw new Error(
+      "Google returned that event without an etag, so the answer cannot be written without risking overwriting a change made in the meantime. Nothing was changed.",
+    );
+  }
+
+  const patched = await patchWithConflictNote(calendar, {
+    calendarId,
+    eventId: input.eventId,
+    // Notification mail only. The answer itself reaches the organizer's copy
+    // either way; "all" would mail every guest on the invitation, and the
+    // optional comment is text this server was handed, not text a human typed.
+    sendUpdates: "none",
+    requestBody: { attendees },
+    etag,
+  });
+
+  const stored = (patched.attendees ?? attendees)[own];
+
+  return {
+    calendarId,
+    eventId: input.eventId,
+    summary: patched.summary ?? current.data.summary ?? undefined,
+    start: patched.start?.dateTime ?? patched.start?.date ?? undefined,
+    attendee: stored?.email ?? undefined,
+    responseStatus: stored?.responseStatus ?? undefined,
+    comment: stored?.comment ?? undefined,
+  };
+}
+
+// A 412 here is ordinary: it means someone else touched the event between the
+// read and the write. Left raw it reaches the caller as "status code 412",
+// which invites guessing instead of a re-read.
+async function patchWithConflictNote(
+  calendar: RsvpCalendarClient,
+  input: {
+    calendarId: string;
+    eventId: string;
+    sendUpdates: string;
+    requestBody: { attendees: calendar_v3.Schema$EventAttendee[] };
+    etag: string;
+  },
+): Promise<calendar_v3.Schema$Event> {
+  const { etag, ...params } = input;
+  try {
+    const response = await calendar.events.patch(params, { headers: { "If-Match": etag } });
+    return response.data;
+  } catch (error) {
+    if (isPreconditionFailedError(error)) {
+      throw new Error(
+        "That event changed while the answer was being prepared, so nothing was written. Read it again and repeat the answer.",
+      );
+    }
+    throw error;
+  }
+}
+
+export function isPreconditionFailedError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: unknown; status?: unknown; response?: { status?: unknown } };
+  return candidate.code === 412 || candidate.status === 412 || candidate.response?.status === 412;
+}
+
 export function registerCalendarTools(server: McpServer): void {
   server.tool(
     "calendar_list_calendars",
@@ -119,6 +340,33 @@ export function registerCalendarTools(server: McpServer): void {
             calendarEventsRequest({ calendarId, timeMin, timeMax, maxResults }),
           );
           return (response.data.items ?? []).map(summarizeEvent);
+        });
+      }, account),
+  );
+
+  server.tool(
+    "calendar_respond_to_event",
+    "Answer a calendar invitation on behalf of the calling account: accept, decline, or answer tentatively, with an optional comment to the organizer. Changes only this account's own participation status — it cannot create, move, or delete an event, or change anyone else's answer.",
+    {
+      ...accountShape,
+      calendarId: z.string().min(1).optional().describe('Calendar id; defaults to "primary".'),
+      eventId: z.string().min(1).describe("Event id, as returned by calendar_list_events."),
+      response: z.enum(RSVP_RESPONSES).describe("The answer to record for this account."),
+      comment: z.string().max(1024).optional().describe("Optional note sent to the organizer."),
+    },
+    async ({ account, calendarId, eventId, response, comment }) =>
+      safeTool(async () => {
+        assertCalendarWriteScope(account);
+        const selfEmail = await accountAddress(account);
+        return await withCalendarScopeErrors(account, async () => {
+          const calendar = await calendarForAccount(account);
+          return await respondToEvent(calendar, {
+            calendarId,
+            eventId,
+            selfEmail,
+            response,
+            comment,
+          });
         });
       }, account),
   );

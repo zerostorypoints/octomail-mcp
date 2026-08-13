@@ -11,12 +11,30 @@ This MCP server talks to the Gmail API on your behalf using these OAuth scopes:
 | `gmail.compose` | Create drafts, and send them via `gmail_send_draft` — this scope has always granted send |
 | `gmail.settings.basic` | List, create, and delete filters |
 | `calendar.readonly` | List calendars and events |
-| `calendar.events` | Requested for a planned future feature (busy-block sync between calendars); no registered tool uses it yet |
+| `calendar.events` | Answer invitations via `calendar_respond_to_event`; also covers a planned busy-block sync between calendars, which has no tool yet |
 
-No registered tool can create, change, or delete a calendar event. `calendar.events` is
-requested on the consent screen so accounts won't need a second manual re-authorization
-once the write tool ships, but a granted scope does nothing by itself — only a
-registered tool that calls it can act, and none does today.
+No registered tool can create, move, or delete a calendar event. The one tool that
+writes to a calendar is `calendar_respond_to_event`, and all it writes is the calling
+account's own `responseStatus`, plus an optional comment to the organizer.
+
+The entry it rewrites has to satisfy two conditions: it carries the account's own
+address (from `accounts.json`, or from Google if that is not recorded yet), and Google
+marks it `self`. Google's `self` flag alone would not do — it marks the attendee whose
+calendar the copy was read from, so on a shared calendar the account has write access
+to, `self` is the calendar owner, and answering by `self` would rewrite their answer.
+An event that lists the account twice, or not at all, is refused rather than guessed at,
+as is a recurring series id, which would answer for every occurrence at once.
+
+The write is a field-scoped `patch` of the attendee list guarded by the event's `etag`;
+an event that arrives without one is refused rather than written unguarded, and a
+concurrent change by someone else fails the write instead of being silently reverted.
+`sendUpdates` is `none`: the answer propagates to the organizer's copy of the event on
+its own, whereas notification mail would put text this server was handed — event ids and
+comments can originate in mail written by third parties — into every guest's inbox.
+
+The remaining use of `calendar.events` — mirroring busy blocks between calendars — is
+still unimplemented; a granted scope does nothing by itself, only a registered tool
+that calls it can act.
 
 `gmail.compose` grants send, and every account has held it since it first
 authorized — a token holder could always send mail through the Gmail API,
