@@ -26,8 +26,18 @@ export type RawAccountEntry = {
   allowedRecipients?: string[];
 };
 
+// A subscribed iCal feed belongs to no account: it is a URL anyone holding the
+// link can read, with no OAuth and no mailbox behind it. So feeds sit beside
+// `accounts`, not inside one — putting them under an account would imply an
+// authorization relationship that does not exist.
+export type RawFeedEntry = {
+  url: string;
+  label?: string;
+};
+
 export type RawAccountsConfig = {
   accounts: Record<string, RawAccountEntry>;
+  calendarFeeds?: Record<string, RawFeedEntry>;
 };
 
 export type AccountConfig = {
@@ -154,7 +164,66 @@ export function validateRawConfig(parsed: unknown, configPath: string): RawAccou
     accounts[alias] = value;
   }
 
-  return { accounts };
+  return { accounts, ...validateRawFeeds(parsed, configPath) };
+}
+
+// Returned as a partial config rather than assigned in place, because
+// validateRawConfig rebuilds the object it returns and saveAccountsConfig
+// writes that object back over the file. A key this function dropped would be
+// erased from accounts.json the next time `npm run auth` touched it.
+function validateRawFeeds(
+  parsed: unknown,
+  configPath: string,
+): { calendarFeeds?: Record<string, RawFeedEntry> } {
+  if (typeof parsed !== "object" || parsed === null || !("calendarFeeds" in parsed)) {
+    return {};
+  }
+
+  const raw = (parsed as { calendarFeeds: unknown }).calendarFeeds;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(
+      `Invalid "calendarFeeds" at ${configPath}. Expected an object such as {"holidays": {"url": "https://..."}}.`,
+    );
+  }
+
+  const calendarFeeds: Record<string, RawFeedEntry> = {};
+  for (const [alias, entry] of Object.entries(raw as Record<string, unknown>)) {
+    assertValidAlias(alias);
+
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error(`Invalid feed config for "${alias}". Expected an object with a "url".`);
+    }
+
+    const value = entry as RawFeedEntry;
+    if (typeof value.url !== "string" || value.url.trim() === "") {
+      throw new Error(`Feed "${alias}" has no "url". Expected the https:// or webcal:// subscription link.`);
+    }
+    if (value.label !== undefined && typeof value.label !== "string") {
+      throw new Error(`Invalid "label" for feed "${alias}". Expected a string.`);
+    }
+
+    calendarFeeds[alias] = { url: value.url.trim(), ...(value.label ? { label: value.label } : {}) };
+  }
+
+  return { calendarFeeds };
+}
+
+export function listFeedAliases(): string[] {
+  return Object.keys(loadRawAccountsConfig().calendarFeeds ?? {});
+}
+
+export function getFeedConfig(alias: string): RawFeedEntry {
+  const feeds = loadRawAccountsConfig().calendarFeeds ?? {};
+  const feed = feeds[alias];
+  if (!feed) {
+    const known = Object.keys(feeds);
+    throw new Error(
+      known.length
+        ? `Unknown feed "${alias}". Configured feeds: ${known.join(", ")}.`
+        : `Unknown feed "${alias}". No "calendarFeeds" are configured in ${accountsConfigPath()}.`,
+    );
+  }
+  return feed;
 }
 
 export function loadRawAccountsConfig(): RawAccountsConfig {
