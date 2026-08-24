@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { registerAttachmentTools } from "./attachments.js";
 import { registerCalendarTools } from "./calendar.js";
+import { registerCalendarWriteTools } from "./calendar-write.js";
 import { loadAccountsConfig } from "./config.js";
 import { registerDraftTools } from "./drafts.js";
 import { registerFilterTools } from "./filters.js";
@@ -220,6 +221,7 @@ registerFilterTools(server);
 registerAttachmentTools(server);
 registerDraftTools(server);
 registerCalendarTools(server);
+registerCalendarWriteTools(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
