@@ -54,6 +54,36 @@ In the example above, `personal` and `support` have no `allowedRecipients`
 field, so `gmail_send_draft` refuses to send anything on either account —
 that is the default for every account until you add the field.
 
+## `calendarFeeds`: subscribed iCal feeds
+
+Feeds sit beside `accounts`, not inside one, because a subscribed `.ics` feed
+belongs to no account: it is a URL, readable by anyone holding the link, with
+no OAuth and no mailbox behind it.
+
+```json
+{
+  "accounts": { "work": {} },
+  "calendarFeeds": {
+    "holidays": { "url": "webcal://example.com/holidays.ics", "label": "Public holidays" }
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `url` | The subscription link. `webcal://` is accepted and rewritten to `https://`, which is what it already is on the wire. Plain `http://` is refused — the URL is a bearer secret for the whole calendar and must not travel in clear. |
+| `label` | Free text you write, for your own reference. |
+
+`ical_list_events` takes the **alias**, never a URL. That is deliberate: a tool
+that fetched whatever URL it was handed would let anything this server reads —
+a web page, a message, an event description — steer it at an arbitrary host.
+
+These feeds are read-only, and not by choice: iCalendar over HTTP has no write
+verb. To edit the events, mirror the feed into a real Google calendar and edit
+the copy with `calendar_update_event`. If the source is iCloud, Fastmail, or
+Nextcloud, it also speaks CalDAV, which does support writing — that would be a
+separate client with its own credentials.
+
 ## `allowedRecipients`: who an account can send to
 
 `gmail_send_draft` is the only tool that transmits mail, and it will not send

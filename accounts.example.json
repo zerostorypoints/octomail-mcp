@@ -6,5 +6,8 @@
       "allowedRecipients": ["@example.com", "accountant@partner.example"]
     },
     "support": {}
+  },
+  "calendarFeeds": {
+    "holidays": { "url": "webcal://example.com/holidays.ics", "label": "Public holidays" }
   }
 }

@@ -177,3 +177,36 @@ test("validateRawConfig rejects an empty allowlist entry with an accurate messag
     (err: unknown) => err instanceof Error && /empty/i.test(err.message) && !/non-ASCII/i.test(err.message),
   );
 });
+
+test("validateRawConfig carries calendarFeeds through, so saving the config cannot erase them", () => {
+  const config = validateRawConfig(
+    {
+      accounts: { work: {} },
+      calendarFeeds: { holidays: { url: "webcal://example.com/pl.ics", label: "Dni wolne" } },
+    },
+    "test.json",
+  );
+
+  assert.deepEqual(config.calendarFeeds, {
+    holidays: { url: "webcal://example.com/pl.ics", label: "Dni wolne" },
+  });
+});
+
+test("validateRawConfig leaves calendarFeeds absent when the file has none", () => {
+  const config = validateRawConfig({ accounts: { work: {} } }, "test.json");
+  assert.equal(config.calendarFeeds, undefined);
+});
+
+test("validateRawConfig rejects a feed without a url", () => {
+  assert.throws(
+    () => validateRawConfig({ accounts: {}, calendarFeeds: { holidays: { label: "x" } } }, "test.json"),
+    /no "url"/,
+  );
+});
+
+test("validateRawConfig rejects a feed alias with characters an alias may not contain", () => {
+  assert.throws(
+    () => validateRawConfig({ accounts: {}, calendarFeeds: { "bad alias": { url: "https://x/y.ics" } } }, "test.json"),
+    /alias/i,
+  );
+});

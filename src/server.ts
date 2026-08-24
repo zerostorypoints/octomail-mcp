@@ -8,6 +8,7 @@ import { registerCalendarWriteTools } from "./calendar-write.js";
 import { loadAccountsConfig } from "./config.js";
 import { registerDraftTools } from "./drafts.js";
 import { registerFilterTools } from "./filters.js";
+import { registerIcalTools } from "./ical.js";
 import { describeAccountError, gmailForAccount, summarizeMessage } from "./gmail.js";
 import { registerLabelTools } from "./labels.js";
 import { accountShape, safeTool } from "./tools.js";
@@ -222,6 +223,7 @@ registerAttachmentTools(server);
 registerDraftTools(server);
 registerCalendarTools(server);
 registerCalendarWriteTools(server);
+registerIcalTools(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
