@@ -38,6 +38,42 @@ test("describeMissingCalendarScope names the account and the re-auth command", (
   assert.match(message, /npm run auth -- --account work/);
 });
 
+test("summarizeEvent returns description and creator", () => {
+  // A caller that writes events needs both to recognise its own events on a
+  // later read: the description carries the stamp it wrote, the creator says
+  // whose account wrote it. Without them, deleting "my own" events is guesswork.
+  const summary = summarizeEvent({
+    id: "evt-mine",
+    summary: "[mirror] Busy (work)",
+    description: "sync-bot: work/abc123",
+    creator: { email: "bot@example.com" },
+    start: { dateTime: "2026-08-12T09:00:00+02:00" },
+    end: { dateTime: "2026-08-12T09:30:00+02:00" },
+  });
+
+  assert.equal(summary.description, "sync-bot: work/abc123");
+  assert.equal(summary.creator, "bot@example.com");
+});
+
+test("summarizeEvent trims a long description and drops an empty one", () => {
+  const long = summarizeEvent({
+    id: "evt-long",
+    description: "x".repeat(700),
+    start: { dateTime: "2026-08-12T09:00:00+02:00" },
+    end: { dateTime: "2026-08-12T09:30:00+02:00" },
+  });
+  assert.equal(long.description?.length, 501);
+  assert.ok(long.description?.endsWith("\u2026"));
+
+  const blank = summarizeEvent({
+    id: "evt-blank",
+    description: "   ",
+    start: { dateTime: "2026-08-12T09:00:00+02:00" },
+    end: { dateTime: "2026-08-12T09:30:00+02:00" },
+  });
+  assert.equal(blank.description, undefined);
+});
+
 test("summarizeEvent reports a timed event as not all-day", () => {
   const summary = summarizeEvent({
     id: "evt1",
@@ -137,7 +173,11 @@ test("calendarEventsRequest passes through an explicit calendar and limit", () =
   assert.equal(request.maxResults, 5);
 });
 
-test("summarizeEvent omits description even when event contains it", () => {
+test("summarizeEvent returns a conference-detail description, trimmed", () => {
+  // This used to assert the opposite: descriptions were dropped as ballast.
+  // They are returned now because a writing caller has no other way to
+  // recognise the events it created itself. The ballast concern is answered
+  // by DESCRIPTION_LIMIT, not by dropping the field.
   const summary = summarizeEvent({
     id: "evt_with_desc",
     summary: "Team standup",
@@ -148,7 +188,7 @@ test("summarizeEvent omits description even when event contains it", () => {
 
   assert.equal(summary.id, "evt_with_desc");
   assert.equal(summary.summary, "Team standup");
-  assert.equal("description" in summary, false);
+  assert.ok(summary.description?.startsWith("https://zoom.us/j/123456789"));
 });
 
 // --- RSVP -------------------------------------------------------------------

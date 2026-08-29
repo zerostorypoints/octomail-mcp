@@ -14,14 +14,32 @@ import {
 import { getAccountConfig } from "./config.js";
 import { accountShape, safeTool } from "./tools.js";
 
+/**
+ * Descriptions can run to thousands of characters; a list of fifty events
+ * would otherwise dwarf everything else in the caller's context.
+ */
+const DESCRIPTION_LIMIT = 500;
+
+function trimText(value: string | null | undefined, limit: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const collapsed = value.trim();
+  if (collapsed.length === 0) return undefined;
+  return collapsed.length > limit ? `${collapsed.slice(0, limit)}\u2026` : collapsed;
+}
+
 export function summarizeEvent(event: calendar_v3.Schema$Event) {
   // Google marks all-day events with `date` and timed ones with `dateTime`;
   // there is no explicit flag, so callers would otherwise each re-derive it.
   const allDay = Boolean(event.start?.date && !event.start?.dateTime);
 
-  // Note: description is intentionally omitted. In practice, event descriptions
-  // are often auto-pasted conference details (meeting IDs, access codes, long URLs
-  // with tokens), which add ballast to the list view without value for scheduling.
+  // Descriptions are often auto-pasted conference details (meeting IDs, access
+  // codes, long URLs with tokens), so they are trimmed to DESCRIPTION_LIMIT
+  // rather than returned whole. They are returned at all because a caller that
+  // writes events needs to recognise its OWN events on a later read, and the
+  // description is the only field it can stamp that a person is unlikely to
+  // retype by hand. Same reason for `creator`: without it, "did I create this?"
+  // has no answer, and a caller that deletes what it believes are its own
+  // events would be guessing.
   return {
     id: event.id ?? undefined,
     status: event.status ?? undefined,
@@ -38,7 +56,9 @@ export function summarizeEvent(event: calendar_v3.Schema$Event) {
       timeZone: event.end?.timeZone ?? undefined,
     },
     allDay,
+    description: trimText(event.description, DESCRIPTION_LIMIT),
     organizer: event.organizer?.email ?? undefined,
+    creator: event.creator?.email ?? undefined,
     attendeeCount: event.attendees?.length ?? undefined,
     // Odpowiedz tego kalendarza na zaproszenie: bez niej z listy nie widac,
     // ktore zaproszenia czekaja na decyzje. Tu `self` jest wlasciwe — projekcja
