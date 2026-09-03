@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { gmail_v1 } from "googleapis";
 import { downloadDir } from "./config.js";
 import { collectAttachments, gmailForAccount } from "./gmail.js";
+import type { AttachmentMetadata } from "./gmail.js";
 import { accountShape, safeTool } from "./tools.js";
 import type { OutboundAttachment } from "./mime.js";
 
@@ -86,6 +87,78 @@ export function assertInlineSizeWithinLimit(sizeBytes: number): void {
   }
 }
 
+export type AttachmentDownload = {
+  filename: string;
+  mimeType: string;
+  content: Buffer;
+};
+
+// Gmail issues a fresh attachmentId on every messages.get for the very same
+// part: the id is a per-response token, not a stable key. Verifying a
+// caller's id against a freshly fetched list therefore rejects ids that are
+// still perfectly usable — attachments.get accepts a superseded id and
+// returns the bytes. So the lookup stays, but only to recover a filename and
+// MIME type the download itself does not carry; whether the id is valid is
+// left to Gmail to answer.
+export function matchAttachmentMetadata(
+  candidates: AttachmentMetadata[],
+  attachmentId: string,
+  sizeBytes?: number,
+): AttachmentMetadata | undefined {
+  const byId = candidates.find((candidate) => candidate.attachmentId === attachmentId);
+  if (byId) {
+    return byId;
+  }
+
+  // The id came from this message, so a lone attachment is that attachment
+  // whatever the id now reads as.
+  if (candidates.length === 1) {
+    return candidates[0];
+  }
+
+  // With several parts, the downloaded byte count picks the right one as
+  // long as it picks only one.
+  if (sizeBytes !== undefined) {
+    const bySize = candidates.filter((candidate) => candidate.sizeBytes === sizeBytes);
+    if (bySize.length === 1) {
+      return bySize[0];
+    }
+  }
+
+  return undefined;
+}
+
+export async function downloadAttachment(
+  gmail: gmail_v1.Gmail,
+  messageId: string,
+  attachmentId: string,
+): Promise<AttachmentDownload> {
+  const message = await gmail.users.messages.get({ userId: "me", id: messageId, format: "full" });
+  const candidates = collectAttachments(message.data.payload);
+
+  const response = await gmail.users.messages.attachments
+    .get({ userId: "me", messageId, id: attachmentId })
+    .catch((error: unknown): never => {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Gmail refused attachment ${attachmentId} on message ${messageId}: ${detail}. Call gmail_read_message for a current attachment id.`,
+      );
+    });
+
+  if (response.data.data === null || response.data.data === undefined) {
+    throw new Error(`Gmail returned no data for attachment ${attachmentId} on message ${messageId}.`);
+  }
+
+  const content = Buffer.from(response.data.data, "base64url");
+  const metadata = matchAttachmentMetadata(candidates, attachmentId, content.byteLength);
+
+  return {
+    filename: sanitizeAttachmentFilename(metadata?.filename, attachmentId),
+    mimeType: metadata?.mimeType ?? "application/octet-stream",
+    content,
+  };
+}
+
 export function registerAttachmentTools(server: McpServer): void {
   server.tool(
     "gmail_get_attachment",
@@ -99,36 +172,14 @@ export function registerAttachmentTools(server: McpServer): void {
     async ({ account, messageId, attachmentId, encoding }) =>
       safeTool(async () => {
         const gmail = await gmailForAccount(account);
-
-        const message = await gmail.users.messages.get({ userId: "me", id: messageId, format: "full" });
-        const metadata = collectAttachments(message.data.payload).find(
-          (candidate) => candidate.attachmentId === attachmentId,
-        );
-
-        if (!metadata) {
-          throw new Error(
-            `Message ${messageId} has no attachment with id ${attachmentId}. Call gmail_read_message for the current attachment ids — they change when a message is re-synced.`,
-          );
-        }
-
-        const response = await gmail.users.messages.attachments.get({
-          userId: "me",
-          messageId,
-          id: attachmentId,
-        });
-
-        if (response.data.data === null || response.data.data === undefined) {
-          throw new Error(`Gmail returned no data for attachment ${attachmentId} on message ${messageId}.`);
-        }
-
-        const content = Buffer.from(response.data.data, "base64url");
+        const { filename, mimeType, content } = await downloadAttachment(gmail, messageId, attachmentId);
 
         if (encoding === "base64") {
           assertInlineSizeWithinLimit(content.byteLength);
 
           return {
-            filename: metadata.filename,
-            mimeType: metadata.mimeType,
+            filename,
+            mimeType,
             sizeBytes: content.byteLength,
             base64: content.toString("base64"),
           };
@@ -137,15 +188,11 @@ export function registerAttachmentTools(server: McpServer): void {
         const directory = downloadDir(account);
         fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
 
-        const target = writeAttachmentFileExclusive(
-          directory,
-          sanitizeAttachmentFilename(metadata.filename, attachmentId),
-          content,
-        );
+        const target = writeAttachmentFileExclusive(directory, filename, content);
 
         return {
-          filename: metadata.filename,
-          mimeType: metadata.mimeType,
+          filename,
+          mimeType,
           sizeBytes: content.byteLength,
           path: target,
         };
@@ -239,32 +286,15 @@ export async function loadOutboundAttachments(
       continue;
     }
 
-    const message = await gmail.users.messages.get({ userId: "me", id: spec.messageId, format: "full" });
-    const metadata = collectAttachments(message.data.payload).find(
-      (candidate) => candidate.attachmentId === spec.attachmentId,
-    );
-
-    if (!metadata) {
-      throw new Error(
-        `Message ${spec.messageId} has no attachment with id ${spec.attachmentId}. Nothing was created.`,
-      );
+    let downloaded: AttachmentDownload;
+    try {
+      downloaded = await downloadAttachment(gmail, spec.messageId, spec.attachmentId);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`${detail} Nothing was created.`);
     }
 
-    const response = await gmail.users.messages.attachments.get({
-      userId: "me",
-      messageId: spec.messageId,
-      id: spec.attachmentId,
-    });
-
-    if (response.data.data === null || response.data.data === undefined) {
-      throw new Error(`Gmail returned no data for attachment ${spec.attachmentId}. Nothing was created.`);
-    }
-
-    loaded.push({
-      filename: sanitizeAttachmentFilename(metadata.filename, spec.attachmentId),
-      mimeType: metadata.mimeType,
-      content: Buffer.from(response.data.data, "base64url"),
-    });
+    loaded.push(downloaded);
   }
 
   return loaded;

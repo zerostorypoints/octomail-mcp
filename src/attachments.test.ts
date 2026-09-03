@@ -6,6 +6,7 @@ import os from "node:os";
 import { sanitizeAttachmentFilename, uniqueFilePath } from "./attachments.js";
 import { MAX_INLINE_BASE64_BYTES, assertInlineSizeWithinLimit } from "./attachments.js";
 import { resolveAttachmentPath } from "./attachments.js";
+import { matchAttachmentMetadata } from "./attachments.js";
 
 test("sanitizeAttachmentFilename keeps an ordinary name", () => {
   assert.equal(sanitizeAttachmentFilename("faktura.pdf", "att-1"), "faktura.pdf");
@@ -113,4 +114,40 @@ test("resolveAttachmentPath reports a missing file distinctly from an escape", (
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-root-"));
   assert.throws(() => resolveAttachmentPath("absent.pdf", root), /does not exist/);
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+
+const attachment = (attachmentId: string, filename: string, sizeBytes: number) => ({
+  filename,
+  mimeType: "application/pdf",
+  sizeBytes,
+  attachmentId,
+  inline: false,
+});
+
+test("matchAttachmentMetadata prefers an exact id match", () => {
+  const candidates = [attachment("a", "umowa.pdf", 10), attachment("b", "aneks.pdf", 20)];
+  assert.equal(matchAttachmentMetadata(candidates, "b", 10)?.filename, "aneks.pdf");
+});
+
+// Gmail rotates the id on every messages.get, so the id a caller holds is
+// routinely absent from the current list while still downloading fine.
+test("matchAttachmentMetadata falls back to the only attachment when the id has rotated", () => {
+  const candidates = [attachment("fresh-id", "umowa.pdf", 10)];
+  assert.equal(matchAttachmentMetadata(candidates, "stale-id", 10)?.filename, "umowa.pdf");
+});
+
+test("matchAttachmentMetadata disambiguates a rotated id by downloaded size", () => {
+  const candidates = [attachment("fresh-1", "umowa.pdf", 10), attachment("fresh-2", "aneks.pdf", 20)];
+  assert.equal(matchAttachmentMetadata(candidates, "stale-id", 20)?.filename, "aneks.pdf");
+});
+
+test("matchAttachmentMetadata gives up when several attachments share the size", () => {
+  const candidates = [attachment("fresh-1", "umowa.pdf", 10), attachment("fresh-2", "aneks.pdf", 10)];
+  assert.equal(matchAttachmentMetadata(candidates, "stale-id", 10), undefined);
+});
+
+test("matchAttachmentMetadata gives up when the size is unknown and the message has several parts", () => {
+  const candidates = [attachment("fresh-1", "umowa.pdf", 10), attachment("fresh-2", "aneks.pdf", 20)];
+  assert.equal(matchAttachmentMetadata(candidates, "stale-id"), undefined);
 });
