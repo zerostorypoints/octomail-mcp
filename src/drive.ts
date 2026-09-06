@@ -162,14 +162,20 @@ export function assertDriveScope(account: string): void {
 // access was requested is refused with no network call at all. The catch
 // covers the case where the token claims the scope but Google still answers
 // 403 (granted before a re-consent, or since revoked) — that 403 is rewritten
-// into the same re-auth message, so both refusals read identically.
-export async function driveScopeAware<T>(account: string, fn: () => Promise<T>): Promise<T> {
-  assertDriveScope(account);
+// into the same re-auth message, so both refusals read identically. The
+// caller-supplied outcome phrase ("Nothing was changed." / "Nothing was
+// uploaded.") is appended to both refusals so they match what the calling
+// tool promises, the same way getFolder and assertDriveName do.
+export async function driveScopeAware<T>(account: string, outcome: string, fn: () => Promise<T>): Promise<T> {
+  const preflightMessage = missingDriveScope(readAccountToken(account), account);
+  if (preflightMessage) {
+    throw new Error(`${preflightMessage} ${outcome}`);
+  }
   try {
     return await fn();
   } catch (error) {
     if (isScopeInsufficientError(error)) {
-      throw new Error(describeMissingDriveScope(account));
+      throw new Error(`${describeMissingDriveScope(account)} ${outcome}`);
     }
     throw error;
   }
@@ -324,7 +330,7 @@ export function registerDriveTools(server: McpServer): void {
     async ({ account, ...input }) =>
       safeTool(async () => {
         assertListInput(input);
-        return await driveScopeAware(account, async () => {
+        return await driveScopeAware(account, "Nothing was changed.", async () => {
           const drive = await driveForAccount(account);
           return await listFiles(drive, input);
         });
@@ -342,7 +348,7 @@ export function registerDriveTools(server: McpServer): void {
     async ({ account, name, parentId }) =>
       safeTool(async () => {
         assertDriveName(name);
-        return await driveScopeAware(account, async () => {
+        return await driveScopeAware(account, "Nothing was changed.", async () => {
           const drive = await driveForAccount(account);
           return await createFolder(drive, { name, parentId: parentId ?? "root" });
         });

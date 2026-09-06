@@ -508,6 +508,33 @@ test("drive_list_files with a token lacking the Drive scope refuses before any n
     });
 
     assert.match(result.error as string, /npm run auth -- --account work/);
+    assert.ok(
+      (result.error as string).endsWith("Nothing was changed."),
+      `expected error to end with "Nothing was changed.", got: ${result.error}`,
+    );
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_create_folder with a token lacking the Drive scope refuses before any network call", async () => {
+  setupAccountFixture(false);
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([]);
+
+    const result = await callTool(handlers, "drive_create_folder", {
+      account: ACCOUNT,
+      name: "Invoices",
+    });
+
+    assert.match(result.error as string, /npm run auth -- --account work/);
+    assert.ok(
+      (result.error as string).endsWith("Nothing was changed."),
+      `expected error to end with "Nothing was changed.", got: ${result.error}`,
+    );
     assert.deepEqual(calls, []);
   } finally {
     teardownAccountFixture();
