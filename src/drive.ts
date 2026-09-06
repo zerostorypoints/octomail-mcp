@@ -1,0 +1,537 @@
+import { Readable } from "node:stream";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { drive_v3, gmail_v1 } from "googleapis";
+import { z } from "zod";
+import { downloadAttachment } from "./attachments.js";
+import {
+  describeMissingDriveScope,
+  driveForAccount,
+  gmailForAccount,
+  isScopeInsufficientError,
+  readAccountToken,
+  tokenHasScope,
+  DRIVE_SCOPE,
+} from "./gmail.js";
+import { accountShape, safeTool } from "./tools.js";
+
+export const FOLDER_MIME = "application/vnd.google-apps.folder";
+
+export type FileProjection = {
+  id: string;
+  name: string;
+  mimeType: string;
+  isFolder: boolean;
+  sizeBytes?: number;
+  modifiedTime?: string;
+  parents?: string[];
+  webViewLink?: string;
+  md5Checksum?: string;
+};
+
+// Drive always sends id and name when they are in the fields string; a
+// missing one here means the fields string is wrong, not that the file lacks
+// a name, so this should fail loudly rather than paper over it.
+export function fileProjection(file: drive_v3.Schema$File): FileProjection {
+  if (!file.id) {
+    throw new Error("Drive file is missing an id. The fields string requested from Drive is likely wrong.");
+  }
+  if (!file.name) {
+    throw new Error("Drive file is missing a name. The fields string requested from Drive is likely wrong.");
+  }
+
+  const projection: FileProjection = {
+    id: file.id,
+    name: file.name,
+    mimeType: file.mimeType ?? "",
+    isFolder: file.mimeType === FOLDER_MIME,
+  };
+
+  if (file.size !== undefined && file.size !== null) {
+    projection.sizeBytes = Number(file.size);
+  }
+  if (file.modifiedTime) {
+    projection.modifiedTime = file.modifiedTime;
+  }
+  if (file.parents) {
+    projection.parents = file.parents;
+  }
+  if (file.webViewLink) {
+    projection.webViewLink = file.webViewLink;
+  }
+  if (file.md5Checksum) {
+    projection.md5Checksum = file.md5Checksum;
+  }
+
+  return projection;
+}
+
+// Drive's query grammar treats a bare backslash or single quote inside a
+// quoted string literal specially, so both are escaped before the value is
+// interpolated into a query string.
+export function escapeDriveQueryValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+function foldersOnlyClause(foldersOnly: boolean): string {
+  return foldersOnly ? ` and mimeType = '${FOLDER_MIME}'` : "";
+}
+
+export function childrenQuery(folderId: string, foldersOnly: boolean): string {
+  return `'${escapeDriveQueryValue(folderId)}' in parents and trashed = false${foldersOnlyClause(foldersOnly)}`;
+}
+
+export function nameContainsQuery(fragment: string, foldersOnly: boolean): string {
+  return `name contains '${escapeDriveQueryValue(fragment)}' and trashed = false${foldersOnlyClause(foldersOnly)}`;
+}
+
+export function exactNameInFolderQuery(name: string, folderId: string, foldersOnly = false): string {
+  return `name = '${escapeDriveQueryValue(name)}' and '${escapeDriveQueryValue(folderId)}' in parents and trashed = false${foldersOnlyClause(foldersOnly)}`;
+}
+
+export function assertListInput(input: { folderId?: string; nameContains?: string }): void {
+  if (typeof input.folderId === "string" && typeof input.nameContains === "string") {
+    throw new Error("Pass either folderId or nameContains, not both. Nothing was changed.");
+  }
+}
+
+export function assertMoveInput(input: { folderId?: string; name?: string }): void {
+  if (typeof input.folderId !== "string" && typeof input.name !== "string") {
+    throw new Error("Pass folderId to move, name to rename, or both. Nothing was changed.");
+  }
+}
+
+// Control characters and the path separator. Unlike attachment filenames,
+// Drive itself allows ":" and "?" in a file name, so only "/" and controls
+// are rejected here. Checked by code point rather than a regex character
+// class so the control range never needs to appear as a literal escape in
+// this source file.
+const MAX_CONTROL_CODE_POINT = 0x1f;
+const DELETE_CODE_POINT = 0x7f;
+
+function isUnsafeDriveNameChar(ch: string): boolean {
+  if (ch === "/") {
+    return true;
+  }
+  const codePoint = ch.codePointAt(0) ?? 0;
+  return codePoint <= MAX_CONTROL_CODE_POINT || codePoint === DELETE_CODE_POINT;
+}
+
+export function assertDriveName(name: string, outcome = "Nothing was changed."): void {
+  const trimmed = name.trim();
+  if (trimmed.length < 1 || trimmed.length > 255) {
+    throw new Error(`A Drive file name must be 1 to 255 characters long. ${outcome}`);
+  }
+  if ([...name].some(isUnsafeDriveNameChar)) {
+    throw new Error(`A Drive file name cannot contain "/" or control characters. ${outcome}`);
+  }
+}
+
+export function provenanceDescription(input: {
+  account: string;
+  messageId: string;
+  subject?: string;
+  from?: string;
+  date?: string;
+}): string {
+  const lines = [`Saved by Octomail from Gmail account ${input.account}, message ${input.messageId}.`];
+  if (input.subject !== undefined) {
+    lines.push(`Subject: ${input.subject}`);
+  }
+  if (input.from !== undefined) {
+    lines.push(`From: ${input.from}`);
+  }
+  if (input.date !== undefined) {
+    lines.push(`Date: ${input.date}`);
+  }
+  return lines.join("\n").slice(0, 1000);
+}
+
+// Returns the re-auth message when the token demonstrably lacks the Drive
+// scope, and undefined when it holds it or records no scope at all — an
+// unknown scope set is left for Google to answer, as the read tools do.
+export function missingDriveScope(token: { scope?: string | null }, account: string): string | undefined {
+  return tokenHasScope(token, DRIVE_SCOPE) === false ? describeMissingDriveScope(account) : undefined;
+}
+
+// Wraps every Drive call: missingDriveScope is a preflight check against the
+// token's own recorded scope string, so an account authorized before Drive
+// access was requested is refused with no network call at all. The catch
+// covers the case where the token claims the scope but Google still answers
+// 403 (granted before a re-consent, or since revoked) — that 403 is rewritten
+// into the same re-auth message, so both refusals read identically. The
+// caller-supplied outcome phrase ("Nothing was changed." / "Nothing was
+// uploaded.") is appended to both refusals so they match what the calling
+// tool promises, the same way getFolder and assertDriveName do.
+export async function driveScopeAware<T>(account: string, outcome: string, fn: () => Promise<T>): Promise<T> {
+  const preflightMessage = missingDriveScope(readAccountToken(account), account);
+  if (preflightMessage) {
+    throw new Error(`${preflightMessage} ${outcome}`);
+  }
+  try {
+    return await fn();
+  } catch (error) {
+    if (isScopeInsufficientError(error)) {
+      throw new Error(`${describeMissingDriveScope(account)} ${outcome}`);
+    }
+    throw error;
+  }
+}
+
+function isNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: unknown; status?: unknown; response?: { status?: unknown } };
+  return candidate.code === 404 || candidate.status === 404 || candidate.response?.status === 404;
+}
+
+// Shared by getFolder and getFile: fetches a file's validation fields and
+// refuses on 404 or when it is trashed. The mime check that distinguishes a
+// folder from any other file lives only in getFolder, so this holds the
+// 404/trashed handling both callers need without duplicating it. The outcome
+// phrase and noun ("Folder" / "File") come from the caller so the refusal
+// reads the way that tool promises — "Nothing was changed." for
+// create/move, "Nothing was uploaded." for a future upload tool.
+async function getDriveFileForCheck(
+  drive: drive_v3.Drive,
+  fileId: string,
+  outcome: string,
+  noun: "Folder" | "File",
+): Promise<drive_v3.Schema$File> {
+  let file: drive_v3.Schema$File;
+  try {
+    const response = await drive.files.get({
+      fileId,
+      fields: "id,name,mimeType,parents,trashed",
+      supportsAllDrives: true,
+    });
+    file = response.data;
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      throw new Error(`${noun} ${fileId} not found or not accessible to this account. ${outcome}`);
+    }
+    throw error;
+  }
+
+  if (file.trashed) {
+    throw new Error(`${noun} ${fileId} is in the trash. ${outcome}`);
+  }
+
+  return file;
+}
+
+// Validates a folder before any listing or mutating call is built on top of
+// it: exists (and is reachable by this account), not trashed, and actually a
+// folder rather than some other file id. Only the fields needed for that
+// validation are requested; the resulting projection is not what any tool
+// returns to its caller.
+export async function getFolder(drive: drive_v3.Drive, folderId: string, outcome: string): Promise<FileProjection> {
+  const file = await getDriveFileForCheck(drive, folderId, outcome, "Folder");
+  if (file.mimeType !== FOLDER_MIME) {
+    throw new Error(`Folder ${folderId} is not a folder (mimeType ${file.mimeType}). ${outcome}`);
+  }
+  return fileProjection(file);
+}
+
+// Like getFolder but accepts any mime type — used by drive_move_file to
+// validate the file being moved/renamed, which is not necessarily a folder.
+export async function getFile(drive: drive_v3.Drive, fileId: string, outcome: string): Promise<FileProjection> {
+  const file = await getDriveFileForCheck(drive, fileId, outcome, "File");
+  return fileProjection(file);
+}
+
+const FILE_FIELDS = "id,name,mimeType,size,modifiedTime,parents,webViewLink,md5Checksum";
+const LIST_FIELDS = `nextPageToken, incompleteSearch, files(${FILE_FIELDS})`;
+
+// Shared with Tasks 5 and 6 (move/rename) to check for a name collision
+// before writing. pageSize: 2 is enough to distinguish "one match" from "more
+// than one" — the caller only needs the first hit that is not the file being
+// acted on. foldersOnly defaults to false so existing four-argument callers
+// are unaffected; drive_create_folder passes true to restrict the collision
+// check to folders.
+export async function findByExactName(
+  drive: drive_v3.Drive,
+  name: string,
+  folderId: string,
+  excludeId?: string,
+  foldersOnly = false,
+): Promise<FileProjection | undefined> {
+  const response = await drive.files.list({
+    q: exactNameInFolderQuery(name, folderId, foldersOnly),
+    pageSize: 2,
+    fields: LIST_FIELDS,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: "allDrives",
+  });
+
+  const match = (response.data.files ?? []).find((file) => file.id !== excludeId);
+  return match ? fileProjection(match) : undefined;
+}
+
+type ListFilesInput = {
+  folderId?: string;
+  nameContains?: string;
+  foldersOnly?: boolean;
+  maxResults?: number;
+  pageToken?: string;
+};
+
+async function listFiles(
+  drive: drive_v3.Drive,
+  input: ListFilesInput,
+): Promise<{ files: FileProjection[]; nextPageToken?: string; incompleteSearch?: true }> {
+  const foldersOnly = input.foldersOnly ?? false;
+  // folderId defaults to "root" only in this branch — when nameContains is
+  // given, assertListInput has already ruled out folderId being set too, and
+  // nameContainsQuery searches all of Drive, not one folder.
+  const q =
+    input.nameContains !== undefined
+      ? nameContainsQuery(input.nameContains, foldersOnly)
+      : childrenQuery(input.folderId ?? "root", foldersOnly);
+
+  const response = await drive.files.list({
+    q,
+    pageSize: input.maxResults ?? 50,
+    pageToken: input.pageToken,
+    orderBy: "folder,name",
+    fields: LIST_FIELDS,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: "allDrives",
+  });
+
+  const files = (response.data.files ?? []).map(fileProjection);
+  const result: { files: FileProjection[]; nextPageToken?: string; incompleteSearch?: true } = { files };
+  if (response.data.nextPageToken) {
+    result.nextPageToken = response.data.nextPageToken;
+  }
+  if (response.data.incompleteSearch) {
+    result.incompleteSearch = true;
+  }
+  return result;
+}
+
+async function createFolder(
+  drive: drive_v3.Drive,
+  input: { name: string; parentId: string },
+): Promise<{ folder: FileProjection; created: boolean }> {
+  await getFolder(drive, input.parentId, "Nothing was changed.");
+
+  const existing = await findByExactName(drive, input.name, input.parentId, undefined, true);
+  if (existing) {
+    return { folder: existing, created: false };
+  }
+
+  const response = await drive.files.create({
+    requestBody: { name: input.name, mimeType: FOLDER_MIME, parents: [input.parentId] },
+    fields: FILE_FIELDS,
+    supportsAllDrives: true,
+  });
+
+  return { folder: fileProjection(response.data), created: true };
+}
+
+// The spec this tool follows lists the collision check before the download.
+// It runs the other way here: the default target name is the attachment's
+// own (sanitised) filename, which only the download reveals, and fetching
+// the attachment twice just to learn its name first is wasteful. getFolder
+// still runs before any Gmail call, so a bad folder id never costs a Gmail
+// round trip either way.
+async function saveAttachmentToDrive(
+  drive: drive_v3.Drive,
+  gmail: gmail_v1.Gmail,
+  input: { account: string; messageId: string; attachmentId: string; folderId: string; name?: string },
+): Promise<{
+  file: FileProjection;
+  sourceMessageId: string;
+  sourceAttachment: { filename: string; mimeType: string; sizeBytes: number };
+}> {
+  await getFolder(drive, input.folderId, "Nothing was uploaded.");
+
+  const downloaded = await downloadAttachment(gmail, input.messageId, input.attachmentId);
+
+  const targetName = input.name ?? downloaded.filename;
+  assertDriveName(targetName, "Nothing was uploaded.");
+  const existing = await findByExactName(drive, targetName, input.folderId, undefined);
+  if (existing) {
+    throw new Error(
+      `A file named "${targetName}" already exists in that folder (id ${existing.id}, ${existing.webViewLink}). Pass a different name. Nothing was uploaded.`,
+    );
+  }
+
+  const description = provenanceDescription({
+    account: input.account,
+    messageId: input.messageId,
+    subject: downloaded.headers.subject,
+    from: downloaded.headers.from,
+    date: downloaded.headers.date,
+  });
+
+  const response = await drive.files.create({
+    requestBody: { name: targetName, parents: [input.folderId], description },
+    media: { mimeType: downloaded.mimeType, body: Readable.from(downloaded.content) },
+    fields: FILE_FIELDS,
+    supportsAllDrives: true,
+  });
+
+  return {
+    file: fileProjection(response.data),
+    sourceMessageId: input.messageId,
+    sourceAttachment: {
+      filename: downloaded.filename,
+      mimeType: downloaded.mimeType,
+      sizeBytes: downloaded.content.byteLength,
+    },
+  };
+}
+
+// The target folder for the collision check is the new folder when moving,
+// otherwise the file's first current parent — a file with no parents and no
+// folderId (a rename with nowhere to collide) skips the check entirely,
+// matching drive_create_folder's and drive_save_attachment's "check before
+// write" shape without requiring a folder to exist for a plain rename.
+async function moveFile(
+  drive: drive_v3.Drive,
+  input: { fileId: string; folderId?: string; name?: string },
+): Promise<{ file: FileProjection; previousParents: string[]; previousName: string }> {
+  const file = await getFile(drive, input.fileId, "Nothing was changed.");
+
+  if (input.folderId !== undefined) {
+    await getFolder(drive, input.folderId, "Nothing was changed.");
+  }
+
+  const previousParents = file.parents ?? [];
+  const targetFolderId = input.folderId ?? previousParents[0];
+
+  if (targetFolderId !== undefined) {
+    const targetName = input.name ?? file.name;
+    const existing = await findByExactName(drive, targetName, targetFolderId, input.fileId);
+    if (existing) {
+      throw new Error(
+        `A file named "${targetName}" already exists in that folder (id ${existing.id}, ${existing.webViewLink}). Pass a different name. Nothing was changed.`,
+      );
+    }
+  }
+
+  const updateParams: drive_v3.Params$Resource$Files$Update = {
+    fileId: input.fileId,
+    fields: FILE_FIELDS,
+    supportsAllDrives: true,
+  };
+  if (input.folderId !== undefined) {
+    updateParams.addParents = input.folderId;
+    if (previousParents.length > 0) {
+      updateParams.removeParents = previousParents.join(",");
+    }
+  }
+  if (input.name !== undefined) {
+    updateParams.requestBody = { name: input.name };
+  }
+
+  const response = await drive.files.update(updateParams);
+
+  return {
+    file: fileProjection(response.data),
+    previousParents,
+    previousName: file.name,
+  };
+}
+
+export function registerDriveTools(server: McpServer): void {
+  server.tool(
+    "drive_list_files",
+    "List files and folders in a Google Drive folder, or search all of Drive by a name fragment. Read-only: it never opens, downloads, or reveals file content, only metadata (name, type, size, modified time, parent folders, link, checksum). Pass folderId or nameContains, not both.",
+    {
+      ...accountShape,
+      folderId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe('Parent folder id to list the children of. Defaults to "root" when nameContains is not given.'),
+      nameContains: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Search all of Drive (not one folder) for files whose name contains this fragment."),
+      foldersOnly: z.boolean().optional().describe("Restrict results to folders."),
+      maxResults: z.number().int().min(1).max(100).optional().default(50),
+      pageToken: z.string().min(1).optional().describe("Page token from a previous call's nextPageToken."),
+    },
+    async ({ account, ...input }) =>
+      safeTool(async () => {
+        assertListInput(input);
+        return await driveScopeAware(account, "Nothing was changed.", async () => {
+          const drive = await driveForAccount(account);
+          return await listFiles(drive, input);
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_create_folder",
+    "Create a folder in Google Drive. If a folder with the same name already exists directly under the given parent, that folder is returned instead of creating a duplicate. Cannot rename, move, delete, upload into, or share the folder it creates or finds.",
+    {
+      ...accountShape,
+      name: z.string().min(1).describe("Folder name."),
+      parentId: z.string().min(1).optional().describe('Parent folder id. Defaults to "root".'),
+    },
+    async ({ account, name, parentId }) =>
+      safeTool(async () => {
+        assertDriveName(name);
+        return await driveScopeAware(account, "Nothing was changed.", async () => {
+          const drive = await driveForAccount(account);
+          return await createFolder(drive, { name, parentId: parentId ?? "root" });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_save_attachment",
+    "Save a Gmail attachment straight into a Google Drive folder — the bytes go directly from Gmail to Drive, never through local disk and never back in the tool result. Refuses when a file with the target name already exists in that folder rather than overwriting it. Cannot delete anything, and cannot upload a local file: only an attachment already on a Gmail message.",
+    {
+      ...accountShape,
+      messageId: z.string().min(1).describe("Gmail message id the attachment is on."),
+      attachmentId: z.string().min(1).describe("Attachment id, from gmail_read_message."),
+      folderId: z.string().min(1).describe("Destination Drive folder id."),
+      name: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Drive file name. Defaults to the attachment's own (sanitised) filename."),
+    },
+    async ({ account, messageId, attachmentId, folderId, name }) =>
+      safeTool(async () => {
+        return await driveScopeAware(account, "Nothing was uploaded.", async () => {
+          if (name !== undefined) {
+            assertDriveName(name, "Nothing was uploaded.");
+          }
+          const drive = await driveForAccount(account);
+          const gmail = await gmailForAccount(account);
+          return await saveAttachmentToDrive(drive, gmail, { account, messageId, attachmentId, folderId, name });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_move_file",
+    "Move a Google Drive file to a different folder, rename it, or both in one call. Refuses when a file with the resulting name already exists in the target folder. Cannot delete or copy the file, and cannot move it to a different Google account.",
+    {
+      ...accountShape,
+      fileId: z.string().min(1).describe("Drive file id to move or rename."),
+      folderId: z.string().min(1).optional().describe("Destination folder id. Omit to rename without moving."),
+      name: z.string().min(1).optional().describe("New file name. Omit to move without renaming."),
+    },
+    async ({ account, fileId, folderId, name }) =>
+      safeTool(async () => {
+        return await driveScopeAware(account, "Nothing was changed.", async () => {
+          assertMoveInput({ folderId, name });
+          if (name !== undefined) {
+            assertDriveName(name);
+          }
+          const drive = await driveForAccount(account);
+          return await moveFile(drive, { fileId, folderId, name });
+        });
+      }, account),
+  );
+}

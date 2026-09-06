@@ -4,7 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { gmail_v1 } from "googleapis";
 import { downloadDir } from "./config.js";
-import { collectAttachments, gmailForAccount } from "./gmail.js";
+import { collectAttachments, gmailForAccount, messageHeader } from "./gmail.js";
 import type { AttachmentMetadata } from "./gmail.js";
 import { accountShape, safeTool } from "./tools.js";
 import type { OutboundAttachment } from "./mime.js";
@@ -91,6 +91,14 @@ export type AttachmentDownload = {
   filename: string;
   mimeType: string;
   content: Buffer;
+  // Subject/From/Date off the message this attachment came from, for a later
+  // provenance description (e.g. uploading to Drive) without a second Gmail
+  // round trip. Undefined when the message carries no such header.
+  headers: {
+    subject?: string;
+    from?: string;
+    date?: string;
+  };
 };
 
 // Gmail issues a fresh attachmentId on every messages.get for the very same
@@ -156,6 +164,11 @@ export async function downloadAttachment(
     filename: sanitizeAttachmentFilename(metadata?.filename, attachmentId),
     mimeType: metadata?.mimeType ?? "application/octet-stream",
     content,
+    headers: {
+      subject: messageHeader(message.data, "Subject"),
+      from: messageHeader(message.data, "From"),
+      date: messageHeader(message.data, "Date"),
+    },
   };
 }
 

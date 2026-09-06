@@ -38,7 +38,9 @@ Fix it per account:
     npm run auth -- --account <alias>
 
 Approve the additional permission on the consent screen. `npm run doctor` marks
-affected accounts with a `!` line reading "no filter scope".
+affected accounts with a `!` line reading "no filter scope". An account
+authorized before Drive access was requested gets the same treatment — a
+`!` line reading "no drive scope" — and only the Drive tools are affected.
 
 If you are a Google Workspace admin and the consent screen refuses the scope for
 your domain, allow the OAuth client under **Admin console > Security > Access and

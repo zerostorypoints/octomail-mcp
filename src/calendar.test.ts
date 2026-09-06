@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AUTH_SCOPES, CALENDAR_EVENTS_SCOPE, CALENDAR_SCOPE, GMAIL_SCOPES, describeMissingCalendarScope } from "./gmail.js";
+import {
+  AUTH_SCOPES,
+  CALENDAR_EVENTS_SCOPE,
+  CALENDAR_SCOPE,
+  DRIVE_SCOPE,
+  GMAIL_SCOPES,
+  describeMissingCalendarScope,
+} from "./gmail.js";
 import type { calendar_v3 } from "googleapis";
 import {
   calendarEventsRequest,
@@ -22,7 +29,9 @@ test("AUTH_SCOPES keeps every Gmail scope and adds both calendar scopes", () => 
   }
   assert.ok(AUTH_SCOPES.includes(CALENDAR_SCOPE));
   assert.ok(AUTH_SCOPES.includes(CALENDAR_EVENTS_SCOPE));
-  assert.equal(AUTH_SCOPES.length, GMAIL_SCOPES.length + 2);
+  assert.ok(AUTH_SCOPES.includes(DRIVE_SCOPE));
+  assert.equal(AUTH_SCOPES[AUTH_SCOPES.length - 1], DRIVE_SCOPE, "DRIVE_SCOPE should be listed last");
+  assert.equal(AUTH_SCOPES.length, GMAIL_SCOPES.length + 3);
 });
 
 test("AUTH_SCOPES grants no calendar-admin access (create/delete calendars, ACLs)", () => {

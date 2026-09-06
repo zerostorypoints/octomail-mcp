@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { google, gmail_v1, calendar_v3 } from "googleapis";
+import { google, gmail_v1, calendar_v3, drive_v3 } from "googleapis";
 import { Credentials, OAuth2Client } from "google-auth-library";
 import { getAccountConfig, loadOAuthCredentials } from "./config.js";
 
@@ -19,6 +19,10 @@ export const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly
 // grants nothing on its own, only a registered tool can act on it.
 export const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
 
+// Full drive scope, not drive.file: drive.file cannot see folders the app
+// did not create.
+export const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive";
+
 // Scopes requested on the consent screen. Gmail scopes stay grouped in
 // GMAIL_SCOPES so mail code can reason about them alone; the consent screen
 // asks for everything Octomail can use.
@@ -30,7 +34,7 @@ export const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.e
 // calendar.events is listed alongside calendar.readonly, not instead of it:
 // calendarList.list requires calendar.readonly on its own — calendar.events
 // alone does not cover it — so the read tools still need both scopes.
-export const AUTH_SCOPES: readonly string[] = [...GMAIL_SCOPES, CALENDAR_SCOPE, CALENDAR_EVENTS_SCOPE];
+export const AUTH_SCOPES: readonly string[] = [...GMAIL_SCOPES, CALENDAR_SCOPE, CALENDAR_EVENTS_SCOPE, DRIVE_SCOPE];
 
 export function createOAuthClient(redirectUri = "http://127.0.0.1"): OAuth2Client {
   const credentials = loadOAuthCredentials();
@@ -60,6 +64,13 @@ export async function calendarForAccount(account: string): Promise<calendar_v3.C
   const oauth2Client = createOAuthClient();
   oauth2Client.setCredentials(token);
   return google.calendar({ version: "v3", auth: oauth2Client });
+}
+
+export async function driveForAccount(account: string): Promise<drive_v3.Drive> {
+  const token = readAccountToken(account);
+  const oauth2Client = createOAuthClient();
+  oauth2Client.setCredentials(token);
+  return google.drive({ version: "v3", auth: oauth2Client });
 }
 
 export async function listLabelsByName(gmail: gmail_v1.Gmail): Promise<Map<string, string>> {
@@ -326,5 +337,13 @@ export function describeMissingCalendarScope(account: string): string {
     `Gmail account "${account}" was authorized before Octomail requested calendar access.`,
     `Run:\n  npm run auth -- --account ${account}\n`,
     "and approve the new permission. Mail tools keep working meanwhile.",
+  ].join(" ");
+}
+
+export function describeMissingDriveScope(account: string): string {
+  return [
+    `Gmail account "${account}" was authorized before Octomail requested Drive access.`,
+    `Run:\n  npm run auth -- --account ${account}\n`,
+    "and approve the new permission. Mail and calendar tools keep working meanwhile.",
   ].join(" ");
 }

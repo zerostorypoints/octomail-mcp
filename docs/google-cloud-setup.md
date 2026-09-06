@@ -4,7 +4,7 @@ This server talks to Gmail through your own Google Cloud project. You create the
 project once, then every account you add authorizes against it. Nothing here is
 Gmail-account-specific until the "Test users" step below.
 
-## 1. Create a project and enable the Gmail API and Calendar API
+## 1. Create a project and enable the Gmail API, Calendar API, and Drive API
 
 Open the [Google Cloud Console](https://console.cloud.google.com/) and create a
 new project (or pick an existing one you're comfortable using). Then go to
@@ -13,7 +13,9 @@ Google Calendar API is a separate library entry in the same project — search
 for "Google Calendar API" and enable it too. Until it's enabled, the calendar
 tools fail with Google's `SERVICE_DISABLED` / `accessNotConfigured` 403.
 `calendar.readonly` must also be listed among the scopes on the OAuth consent
-screen's scope configuration (step 2 below).
+screen's scope configuration (step 2 below). The Google Drive API is a third
+library entry in the same project — search for "Google Drive API" and enable
+it too, or the Drive tools fail the same way.
 
 ## 2. Configure the OAuth consent screen
 
@@ -90,9 +92,18 @@ You have three options, in order of convenience:
 | `gmail.settings.basic` | List, create, and delete filters |
 | `calendar.readonly` | List calendars and events |
 | `calendar.events` | Requested for a planned future feature (busy-block sync between calendars); no registered tool uses it yet |
+| `drive` | List folders and files, create folders, upload a Gmail attachment, move or rename; full scope because `drive.file` cannot see folders the app did not create |
 
-There is deliberately **no tool that sends mail or deletes a message**. But
-`TRASH` and `SPAM` are ordinary Gmail labels, and adding either one — via
+Adding a scope to this list means every already-authorized account is
+missing it until it re-runs `npm run auth -- --account <alias>` and approves
+the new permission; `npm run doctor` says which accounts are affected and
+for which scope.
+
+There is deliberately **no tool that deletes a message outright**. Sending mail
+does exist: `gmail_send_draft` sends an existing draft, but only behind
+`confirm: true` and only when every recipient is on the account's
+`allowedRecipients` allowlist; see [SECURITY.md](../SECURITY.md) for the full
+policy. But `TRASH` and `SPAM` are ordinary Gmail labels, and adding either one — via
 `gmail_apply_labels`, as a standing rule via `gmail_create_filter`, or applied
 to existing mail via `gmail_backfill_filter` — does trash or spam the message,
 and Gmail purges trashed and spammed mail after 30 days. Adding `TRASH` or
