@@ -99,8 +99,11 @@ missing it until it re-runs `npm run auth -- --account <alias>` and approves
 the new permission; `npm run doctor` says which accounts are affected and
 for which scope.
 
-There is deliberately **no tool that sends mail or deletes a message**. But
-`TRASH` and `SPAM` are ordinary Gmail labels, and adding either one — via
+There is deliberately **no tool that deletes a message outright**. Sending mail
+does exist: `gmail_send_draft` sends an existing draft, but only behind
+`confirm: true` and only when every recipient is on the account's
+`allowedRecipients` allowlist; see [SECURITY.md](../SECURITY.md) for the full
+policy. But `TRASH` and `SPAM` are ordinary Gmail labels, and adding either one — via
 `gmail_apply_labels`, as a standing rule via `gmail_create_filter`, or applied
 to existing mail via `gmail_backfill_filter` — does trash or spam the message,
 and Gmail purges trashed and spammed mail after 30 days. Adding `TRASH` or
