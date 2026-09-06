@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { accountsConfigPath, loadAccountsConfig, loadOAuthCredentials, type AccountsConfig } from "./config.js";
 import {
   CALENDAR_SCOPE,
+  DRIVE_SCOPE,
   FILTER_SCOPE,
   describeAccountError,
   gmailForAccount,
@@ -134,6 +135,17 @@ export async function checkAccounts(
       if (tokenHasScope(readAccountToken(alias), CALENDAR_SCOPE) === false) {
         lines.push(
           `! ${alias.padEnd(width)}— no calendar scope, run: npm run auth -- --account ${alias}`,
+        );
+      }
+    } catch {
+      // Unreadable or malformed token — the getProfile check below is the real
+      // signal for this account, so don't add noise here.
+    }
+
+    try {
+      if (tokenHasScope(readAccountToken(alias), DRIVE_SCOPE) === false) {
+        lines.push(
+          `! ${alias.padEnd(width)}— no drive scope, run: npm run auth -- --account ${alias}`,
         );
       }
     } catch {

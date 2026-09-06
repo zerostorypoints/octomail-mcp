@@ -127,3 +127,106 @@ test("checkAccounts does not warn when the token already has the filter scope", 
     teardown();
   }
 });
+
+test("checkAccounts warns when the token predates the Drive scope", async () => {
+  setup();
+  try {
+    fs.writeFileSync(process.env.OCTOMAIL_ACCOUNTS_FILE as string, JSON.stringify({ accounts: { work: {} } }));
+
+    const tokenPath = path.join(workDir, "tokens", "work.json");
+    fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
+    fs.writeFileSync(
+      tokenPath,
+      JSON.stringify({
+        refresh_token: "r",
+        scope: [
+          "https://www.googleapis.com/auth/gmail.readonly",
+          "https://www.googleapis.com/auth/gmail.modify",
+          "https://www.googleapis.com/auth/gmail.compose",
+          "https://www.googleapis.com/auth/gmail.settings.basic",
+          "https://www.googleapis.com/auth/calendar.readonly",
+          "https://www.googleapis.com/auth/calendar.events",
+        ].join(" "),
+      }),
+    );
+    fs.chmodSync(tokenPath, 0o600);
+
+    const fakeGmailClient: typeof gmailForAccount = (async () =>
+      ({
+        users: { getProfile: async () => ({ data: { emailAddress: "work@example.com" } }) },
+      }) as unknown as Awaited<ReturnType<typeof gmailForAccount>>) as typeof gmailForAccount;
+
+    const result = await checkAccounts(fakeGmailClient);
+
+    const warningLine = result.lines.find((entry) => /^!.*no drive scope/.test(entry));
+    assert.ok(warningLine, `expected a drive-scope "!" line, got: ${JSON.stringify(result.lines)}`);
+    assert.match(warningLine as string, /npm run auth -- --account work/);
+    // A missing optional scope is a warning, not a failure.
+    assert.equal(result.ok, true);
+  } finally {
+    teardown();
+  }
+});
+
+test("checkAccounts does not warn about Drive scope when the token already has it, or predates the scope field entirely", async () => {
+  setup();
+  try {
+    fs.writeFileSync(process.env.OCTOMAIL_ACCOUNTS_FILE as string, JSON.stringify({ accounts: { work: {} } }));
+
+    const tokenPath = path.join(workDir, "tokens", "work.json");
+    fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
+    fs.writeFileSync(
+      tokenPath,
+      JSON.stringify({
+        refresh_token: "r",
+        scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive",
+      }),
+    );
+    fs.chmodSync(tokenPath, 0o600);
+
+    const fakeGmailClient: typeof gmailForAccount = (async () =>
+      ({
+        users: { getProfile: async () => ({ data: { emailAddress: "work@example.com" } }) },
+      }) as unknown as Awaited<ReturnType<typeof gmailForAccount>>) as typeof gmailForAccount;
+
+    const resultWithDrive = await checkAccounts(fakeGmailClient);
+
+    const driveLineWithDrive = resultWithDrive.lines.find((entry) => /drive/i.test(entry));
+    assert.equal(
+      driveLineWithDrive,
+      undefined,
+      `expected no drive-scope line, got: ${JSON.stringify(resultWithDrive.lines)}`,
+    );
+    assert.equal(resultWithDrive.ok, true);
+  } finally {
+    teardown();
+  }
+
+  setup();
+  try {
+    fs.writeFileSync(process.env.OCTOMAIL_ACCOUNTS_FILE as string, JSON.stringify({ accounts: { work: {} } }));
+
+    const tokenPath = path.join(workDir, "tokens", "work.json");
+    fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
+    // Token written before the scope field was persisted at all.
+    fs.writeFileSync(tokenPath, JSON.stringify({ refresh_token: "r" }));
+    fs.chmodSync(tokenPath, 0o600);
+
+    const fakeGmailClient: typeof gmailForAccount = (async () =>
+      ({
+        users: { getProfile: async () => ({ data: { emailAddress: "work@example.com" } }) },
+      }) as unknown as Awaited<ReturnType<typeof gmailForAccount>>) as typeof gmailForAccount;
+
+    const resultNoScopeField = await checkAccounts(fakeGmailClient);
+
+    const driveLineNoScope = resultNoScopeField.lines.find((entry) => /drive/i.test(entry));
+    assert.equal(
+      driveLineNoScope,
+      undefined,
+      `expected no drive-scope line, got: ${JSON.stringify(resultNoScopeField.lines)}`,
+    );
+    assert.equal(resultNoScopeField.ok, true);
+  } finally {
+    teardown();
+  }
+});
