@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { google } from "googleapis";
 import type { drive_v3 } from "googleapis";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { DRIVE_SCOPE } from "./gmail.js";
 import {
   FOLDER_MIME,
   assertDriveName,
@@ -14,6 +20,7 @@ import {
   missingDriveScope,
   nameContainsQuery,
   provenanceDescription,
+  registerDriveTools,
 } from "./drive.js";
 
 // --- fileProjection ---
@@ -247,4 +254,262 @@ test("missingDriveScope returns undefined when scope is absent", () => {
 
 test("assertDriveScope is exported as a function", () => {
   assert.equal(typeof assertDriveScope, "function");
+});
+
+// --- end-to-end: registerDriveTools against a fake Drive network ---
+//
+// Same fake-fetch harness as src/gate.test.ts (test files in this repo do not
+// import each other, so it is copied rather than shared) — a fake
+// fetchImplementation merged onto the shared `google` singleton intercepts
+// every request googleapis makes, with no change to production code. These
+// tests call the real registered handlers, so they prove the refusal paths
+// (assertListInput, assertDriveName, the missing-scope preflight) actually
+// stop the network call, not just that the pure helpers return the right
+// verdict in isolation.
+
+type Handler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: "text"; text: string }> }>;
+
+function createFakeServer(): { server: McpServer; handlers: Map<string, Handler> } {
+  const handlers = new Map<string, Handler>();
+  const server = {
+    tool: (...args: unknown[]) => {
+      const name = args[0] as string;
+      const handler = args[args.length - 1] as Handler;
+      handlers.set(name, handler);
+    },
+  } as unknown as McpServer;
+  return { server, handlers };
+}
+
+async function callTool(
+  handlers: Map<string, Handler>,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const handler = handlers.get(name);
+  if (!handler) {
+    throw new Error(`No handler registered for "${name}"`);
+  }
+  const result = await handler(args);
+  return JSON.parse(result.content[0].text);
+}
+
+type FakeCall = { method: string; pathname: string; url: URL };
+type FakeRoute = { method: string; test: (pathname: string) => boolean; respond: (url: URL) => unknown };
+
+function installFakeNetwork(routes: FakeRoute[]): { calls: FakeCall[] } {
+  const calls: FakeCall[] = [];
+  google.options({
+    fetchImplementation: async (url: unknown, opts?: { method?: string }) => {
+      const parsed = new URL(String(url));
+      const method = (opts?.method ?? "GET").toUpperCase();
+      calls.push({ method, pathname: parsed.pathname, url: parsed });
+
+      const route = routes.find((candidate) => candidate.method === method && candidate.test(parsed.pathname));
+      if (!route) {
+        return new Response(
+          JSON.stringify({ error: { code: 404, message: `no fake route for ${method} ${parsed.pathname}` } }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      return new Response(JSON.stringify(route.respond(parsed)), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  return { calls };
+}
+
+const ACCOUNT = "work";
+let fixtureDir: string;
+
+function setupAccountFixture(withDriveScope = true): void {
+  fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-drive-test-"));
+  process.env.OCTOMAIL_ACCOUNTS_FILE = path.join(fixtureDir, "accounts.json");
+  process.env.OCTOMAIL_TOKEN_DIR = path.join(fixtureDir, "tokens");
+  process.env.GOOGLE_CLIENT_ID = "test-client-id";
+  process.env.GOOGLE_CLIENT_SECRET = "test-client-secret";
+
+  fs.mkdirSync(process.env.OCTOMAIL_TOKEN_DIR, { recursive: true });
+  fs.writeFileSync(process.env.OCTOMAIL_ACCOUNTS_FILE, JSON.stringify({ accounts: { [ACCOUNT]: {} } }));
+
+  const scopes = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"];
+  if (withDriveScope) {
+    scopes.push(DRIVE_SCOPE);
+  }
+
+  fs.writeFileSync(
+    path.join(process.env.OCTOMAIL_TOKEN_DIR, `${ACCOUNT}.json`),
+    JSON.stringify({
+      access_token: "fake-access-token",
+      refresh_token: "fake-refresh-token",
+      scope: scopes.join(" "),
+      token_type: "Bearer",
+      // Far enough out that OAuth2Client never attempts a refresh.
+      expiry_date: Date.now() + 60 * 60 * 1000,
+    }),
+  );
+}
+
+function teardownAccountFixture(): void {
+  delete process.env.OCTOMAIL_ACCOUNTS_FILE;
+  delete process.env.OCTOMAIL_TOKEN_DIR;
+  delete process.env.GOOGLE_CLIENT_ID;
+  delete process.env.GOOGLE_CLIENT_SECRET;
+  google.options({});
+  fs.rmSync(fixtureDir, { recursive: true, force: true });
+}
+
+const FOLDER_A = { id: "folderA", name: "Reports", mimeType: FOLDER_MIME };
+const FILE_A = { id: "fileA", name: "notes.txt", mimeType: "text/plain" };
+const PARENT_FOLDER = { id: "parent1", name: "Parent", mimeType: FOLDER_MIME };
+const EXISTING_FOLDER = { id: "existing1", name: "Invoices", mimeType: FOLDER_MIME };
+const CREATED_FOLDER = { id: "new1", name: "Invoices", mimeType: FOLDER_MIME };
+
+test("drive_list_files with both folderId and nameContains refuses before any network call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([]);
+
+    const result = await callTool(handlers, "drive_list_files", {
+      account: ACCOUNT,
+      folderId: "folder1",
+      nameContains: "report",
+    });
+
+    assert.match(result.error as string, /Pass either folderId or nameContains, not both\. Nothing was changed\./);
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_list_files lists a folder's children with all-drives params and the expected query", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: [FOLDER_A, FILE_A] }) },
+    ]);
+
+    const result = await callTool(handlers, "drive_list_files", {
+      account: ACCOUNT,
+      folderId: "folder1",
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    const files = result.files as Array<{ id: string }>;
+    assert.equal(files.length, 2);
+    assert.equal(files[0].id, "folderA");
+
+    const listCall = calls.find((call) => call.method === "GET" && call.pathname === "/drive/v3/files");
+    assert.ok(listCall, `expected a GET to /drive/v3/files; calls were: ${JSON.stringify(calls)}`);
+    const q = listCall!.url.searchParams.get("q") ?? "";
+    assert.match(q, /'folder1' in parents/);
+    assert.match(q, /trashed = false/);
+    assert.equal(listCall!.url.searchParams.get("supportsAllDrives"), "true");
+    assert.equal(listCall!.url.searchParams.get("includeItemsFromAllDrives"), "true");
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_create_folder returns the existing folder and creates nothing when one with that name already exists", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === "/drive/v3/files/parent1", respond: () => PARENT_FOLDER },
+      { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: [EXISTING_FOLDER] }) },
+    ]);
+
+    const result = await callTool(handlers, "drive_create_folder", {
+      account: ACCOUNT,
+      name: "Invoices",
+      parentId: "parent1",
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.created, false);
+    assert.equal((result.folder as { id: string }).id, "existing1");
+    assert.ok(
+      !calls.some((call) => call.method === "POST"),
+      `expected no POST; calls were: ${JSON.stringify(calls)}`,
+    );
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_create_folder creates the folder when none with that name exists yet", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === "/drive/v3/files/parent1", respond: () => PARENT_FOLDER },
+      { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: [] }) },
+      { method: "POST", test: (p) => p === "/drive/v3/files", respond: () => CREATED_FOLDER },
+    ]);
+
+    const result = await callTool(handlers, "drive_create_folder", {
+      account: ACCOUNT,
+      name: "Invoices",
+      parentId: "parent1",
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.created, true);
+    assert.equal((result.folder as { id: string }).id, "new1");
+    assert.ok(
+      calls.some((call) => call.method === "POST" && call.pathname === "/drive/v3/files"),
+      `expected a POST to /drive/v3/files; calls were: ${JSON.stringify(calls)}`,
+    );
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_create_folder with an invalid name refuses before any network call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([]);
+
+    const result = await callTool(handlers, "drive_create_folder", {
+      account: ACCOUNT,
+      name: "bad/name",
+    });
+
+    assert.match(result.error as string, /Nothing was changed\./);
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_list_files with a token lacking the Drive scope refuses before any network call", async () => {
+  setupAccountFixture(false);
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([]);
+
+    const result = await callTool(handlers, "drive_list_files", {
+      account: ACCOUNT,
+      folderId: "root",
+    });
+
+    assert.match(result.error as string, /npm run auth -- --account work/);
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
 });
