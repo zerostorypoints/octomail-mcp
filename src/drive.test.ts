@@ -802,3 +802,191 @@ test("drive_save_attachment uploads the attachment into the folder with no base6
     teardownAccountFixture();
   }
 });
+
+// --- end-to-end: drive_move_file ---
+//
+// Same fake-fetch harness. These prove the order of operations (scope ->
+// assertMoveInput -> assertDriveName -> getFile -> getFolder -> collision
+// check -> files.update) via the recorded `calls` array, not just that the
+// pure helpers return the right verdict in isolation.
+
+const MOVE_FILE_ID = "f1";
+const MOVE_OLD_PARENT = "old1";
+const MOVE_NEW_FOLDER = { id: "new1", name: "Target", mimeType: FOLDER_MIME };
+const MOVE_FILE = { id: MOVE_FILE_ID, name: "notes.txt", mimeType: "text/plain", parents: [MOVE_OLD_PARENT] };
+const MOVE_FILE_NO_PARENTS = { id: MOVE_FILE_ID, name: "notes.txt", mimeType: "text/plain" };
+const MOVE_TRASHED_FILE = { id: MOVE_FILE_ID, name: "notes.txt", mimeType: "text/plain", trashed: true };
+const MOVE_UPDATED_FILE = { id: MOVE_FILE_ID, name: "notes.txt", mimeType: "text/plain", parents: [MOVE_NEW_FOLDER.id] };
+const MOVE_RENAMED_FILE = { id: MOVE_FILE_ID, name: "renamed.txt", mimeType: "text/plain", parents: [MOVE_OLD_PARENT] };
+const MOVE_COLLISION_FILE = {
+  id: "collision-id",
+  name: "notes.txt",
+  mimeType: "text/plain",
+  webViewLink: "https://drive.google.com/file/d/collision-id/view",
+};
+
+test("drive_move_file with neither folderId nor name refuses before any network call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([]);
+
+    const result = await callTool(handlers, "drive_move_file", {
+      account: ACCOUNT,
+      fileId: MOVE_FILE_ID,
+    });
+
+    assert.match(result.error as string, /Pass folderId to move, name to rename, or both\. Nothing was changed\./);
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_move_file moves a file into a new folder", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === `/drive/v3/files/${MOVE_FILE_ID}`, respond: () => MOVE_FILE },
+      { method: "GET", test: (p) => p === `/drive/v3/files/${MOVE_NEW_FOLDER.id}`, respond: () => MOVE_NEW_FOLDER },
+      { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: [] }) },
+      { method: "PATCH", test: (p) => p === `/drive/v3/files/${MOVE_FILE_ID}`, respond: () => MOVE_UPDATED_FILE },
+    ]);
+
+    const result = await callTool(handlers, "drive_move_file", {
+      account: ACCOUNT,
+      fileId: MOVE_FILE_ID,
+      folderId: MOVE_NEW_FOLDER.id,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.deepEqual(result.previousParents, [MOVE_OLD_PARENT]);
+    assert.equal((result.file as { id: string }).id, MOVE_FILE_ID);
+
+    const patchCall = calls.find(
+      (call) => call.method === "PATCH" && call.pathname === `/drive/v3/files/${MOVE_FILE_ID}`,
+    );
+    assert.ok(patchCall, `expected a PATCH to /drive/v3/files/${MOVE_FILE_ID}; calls were: ${JSON.stringify(calls)}`);
+    assert.equal(patchCall!.url.searchParams.get("addParents"), MOVE_NEW_FOLDER.id);
+    assert.equal(patchCall!.url.searchParams.get("removeParents"), MOVE_OLD_PARENT);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_move_file renames a file without moving it", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === `/drive/v3/files/${MOVE_FILE_ID}`, respond: () => MOVE_FILE },
+      { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: [] }) },
+      { method: "PATCH", test: (p) => p === `/drive/v3/files/${MOVE_FILE_ID}`, respond: () => MOVE_RENAMED_FILE },
+    ]);
+
+    const result = await callTool(handlers, "drive_move_file", {
+      account: ACCOUNT,
+      fileId: MOVE_FILE_ID,
+      name: "renamed.txt",
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.previousName, "notes.txt");
+
+    const patchCall = calls.find(
+      (call) => call.method === "PATCH" && call.pathname === `/drive/v3/files/${MOVE_FILE_ID}`,
+    );
+    assert.ok(patchCall, `expected a PATCH to /drive/v3/files/${MOVE_FILE_ID}; calls were: ${JSON.stringify(calls)}`);
+    assert.equal(patchCall!.url.searchParams.get("addParents"), null);
+    assert.match(patchCall!.body ?? "", /"name":\s*"renamed\.txt"/);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_move_file renames a parentless file without a collision check", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === `/drive/v3/files/${MOVE_FILE_ID}`, respond: () => MOVE_FILE_NO_PARENTS },
+      { method: "PATCH", test: (p) => p === `/drive/v3/files/${MOVE_FILE_ID}`, respond: () => MOVE_RENAMED_FILE },
+    ]);
+
+    const result = await callTool(handlers, "drive_move_file", {
+      account: ACCOUNT,
+      fileId: MOVE_FILE_ID,
+      name: "renamed.txt",
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.ok(
+      !calls.some((call) => call.method === "GET" && call.pathname === "/drive/v3/files"),
+      `expected no list call; calls were: ${JSON.stringify(calls)}`,
+    );
+    assert.ok(
+      calls.some((call) => call.method === "PATCH" && call.pathname === `/drive/v3/files/${MOVE_FILE_ID}`),
+      `expected a PATCH; calls were: ${JSON.stringify(calls)}`,
+    );
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_move_file refuses on a name collision in the target folder, naming the existing file, without a PATCH", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === `/drive/v3/files/${MOVE_FILE_ID}`, respond: () => MOVE_FILE },
+      { method: "GET", test: (p) => p === `/drive/v3/files/${MOVE_NEW_FOLDER.id}`, respond: () => MOVE_NEW_FOLDER },
+      { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: [MOVE_COLLISION_FILE] }) },
+    ]);
+
+    const result = await callTool(handlers, "drive_move_file", {
+      account: ACCOUNT,
+      fileId: MOVE_FILE_ID,
+      folderId: MOVE_NEW_FOLDER.id,
+    });
+
+    assert.match(result.error as string, /collision-id/);
+    assert.match(result.error as string, /Nothing was changed\./);
+    assert.ok(
+      !calls.some((call) => call.method === "PATCH"),
+      `expected no PATCH; calls were: ${JSON.stringify(calls)}`,
+    );
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_move_file refuses a trashed file without a PATCH", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === `/drive/v3/files/${MOVE_FILE_ID}`, respond: () => MOVE_TRASHED_FILE },
+    ]);
+
+    const result = await callTool(handlers, "drive_move_file", {
+      account: ACCOUNT,
+      fileId: MOVE_FILE_ID,
+      name: "renamed.txt",
+    });
+
+    assert.match(result.error as string, /in the trash/);
+    assert.ok(
+      !calls.some((call) => call.method === "PATCH"),
+      `expected no PATCH; calls were: ${JSON.stringify(calls)}`,
+    );
+  } finally {
+    teardownAccountFixture();
+  }
+});
