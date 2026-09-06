@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
+import type { gmail_v1 } from "googleapis";
 import { sanitizeAttachmentFilename, uniqueFilePath } from "./attachments.js";
 import { MAX_INLINE_BASE64_BYTES, assertInlineSizeWithinLimit } from "./attachments.js";
 import { resolveAttachmentPath } from "./attachments.js";
 import { matchAttachmentMetadata } from "./attachments.js";
+import { downloadAttachment } from "./attachments.js";
 
 test("sanitizeAttachmentFilename keeps an ordinary name", () => {
   assert.equal(sanitizeAttachmentFilename("faktura.pdf", "att-1"), "faktura.pdf");
@@ -150,4 +152,59 @@ test("matchAttachmentMetadata gives up when several attachments share the size",
 test("matchAttachmentMetadata gives up when the size is unknown and the message has several parts", () => {
   const candidates = [attachment("fresh-1", "umowa.pdf", 10), attachment("fresh-2", "aneks.pdf", 20)];
   assert.equal(matchAttachmentMetadata(candidates, "stale-id"), undefined);
+});
+
+// Builds a fake gmail_v1.Gmail exposing only what downloadAttachment calls:
+// users.messages.get (for the full message, headers included) and
+// users.messages.attachments.get (for the attachment bytes).
+function fakeGmailClient(
+  headers: { name: string; value: string }[],
+): gmail_v1.Gmail {
+  return {
+    users: {
+      messages: {
+        get: async () => ({
+          data: {
+            payload: {
+              headers,
+              parts: [
+                {
+                  filename: "umowa.pdf",
+                  mimeType: "application/pdf",
+                  body: { attachmentId: "att-1", size: 3 },
+                },
+              ],
+            },
+          },
+        }),
+        attachments: {
+          get: async () => ({ data: { data: Buffer.from("abc").toString("base64url") } }),
+        },
+      },
+    },
+  } as unknown as gmail_v1.Gmail;
+}
+
+test("downloadAttachment carries the message's Subject/From/Date alongside the file", async () => {
+  const gmail = fakeGmailClient([
+    { name: "Subject", value: "Faktura wrzesien" },
+    { name: "From", value: "ksiegowosc@example.com" },
+    { name: "Date", value: "Mon, 1 Sep 2025 10:00:00 +0000" },
+  ]);
+
+  const result = await downloadAttachment(gmail, "msg-1", "att-1");
+
+  assert.equal(result.headers.subject, "Faktura wrzesien");
+  assert.equal(result.headers.from, "ksiegowosc@example.com");
+  assert.equal(result.headers.date, "Mon, 1 Sep 2025 10:00:00 +0000");
+});
+
+test("downloadAttachment yields undefined headers when the message carries none of them", async () => {
+  const gmail = fakeGmailClient([]);
+
+  const result = await downloadAttachment(gmail, "msg-1", "att-1");
+
+  assert.equal(result.headers.subject, undefined);
+  assert.equal(result.headers.from, undefined);
+  assert.equal(result.headers.date, undefined);
 });
