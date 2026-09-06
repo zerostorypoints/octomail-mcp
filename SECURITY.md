@@ -12,6 +12,7 @@ This MCP server talks to the Gmail API on your behalf using these OAuth scopes:
 | `gmail.settings.basic` | List, create, and delete filters |
 | `calendar.readonly` | List calendars and events |
 | `calendar.events` | Answer invitations via `calendar_respond_to_event`; also covers a planned busy-block sync between calendars, which has no tool yet |
+| `drive` | List folders and files, create folders, upload a Gmail attachment, move or rename; full scope because `drive.file` cannot see folders the app did not create |
 
 No registered tool can create, move, or delete a calendar event. The one tool that
 writes to a calendar is `calendar_respond_to_event`, and all it writes is the calling
@@ -35,6 +36,12 @@ comments can originate in mail written by third parties — into every guest's i
 The remaining use of `calendar.events` — mirroring busy blocks between calendars — is
 still unimplemented; a granted scope does nothing by itself, only a registered tool
 that calls it can act.
+
+The four Drive tools can list folders and files, create a folder, upload a Gmail
+attachment into a folder, and move or rename a file. No Drive tool deletes, trashes,
+shares, or reads file content. `drive_save_attachment` and `drive_move_file` each
+refuse rather than overwrite when a file of the target name already exists in the
+destination folder.
 
 `gmail.compose` grants send, and every account has held it since it first
 authorized — a token holder could always send mail through the Gmail API,

@@ -46,7 +46,12 @@ removing them is a recovery action and is never gated. The other most
 destructive actions available are deleting a label or a filter, which also
 require an explicit `confirm: true` — without it they return an impact report
 and change nothing. Deleting a label does not delete the messages that
-carried it, only their categorisation. OAuth tokens are stored locally at
+carried it, only their categorisation. The Drive tools can create folders,
+upload a Gmail attachment, and move or rename a file; nothing on Drive is
+ever deleted, trashed, shared, or downloaded, and the only bytes a Drive
+tool ever uploads are a Gmail attachment already on the same account. A
+file already named that in the target folder makes the upload or move
+refuse rather than overwrite it. OAuth tokens are stored locally at
 file mode `0600`. See [SECURITY.md](SECURITY.md) for the full policy and how
 to report a vulnerability.
 
@@ -127,6 +132,10 @@ spam, and deletion actions unless the call carries an explicit
 - `ical_list_feeds()` — lists the subscribed iCal feeds configured under `calendarFeeds` in `accounts.json`, by alias and host. The URL itself is withheld from the result: a feed link is a bearer token for the whole calendar, and results end up in transcripts.
 - `ical_list_events(feed, timeMin, timeMax, maxResults?)` — reads one feed. Recurrence rules are expanded into individual occurrences, `EXDATE` exclusions are honoured, and an override of a single occurrence replaces that occurrence instead of appearing as a second event. Takes a **feed alias, never a URL**, so nothing read from a page or a message can make this server fetch an arbitrary host. Feeds are read-only by nature: an `.ics` subscription is a file served over HTTP and has no write protocol — to get a writable copy, mirror it into a real Google calendar.
 - `calendar_delete_event(account, calendarId?, eventId, confirm?, confirmSeries?, sendUpdates?)` — **cannot be undone**: Google Calendar keeps no trash for events. Without `confirm: true` it deletes nothing and returns the event it would delete, so the decision is made against the real title and time. Also guarded by `If-Match`, and a series id needs `confirmSeries: true`.
+- `drive_list_files(account, folderId?, nameContains?, foldersOnly?, maxResults?, pageToken?)` — lists the children of a folder (default the account's My Drive root) or searches all of Drive, including shared drives, by a name fragment; pass `folderId` or `nameContains`, not both. Read-only: it never returns file content.
+- `drive_create_folder(account, name, parentId?)` — creates a folder, or if one of that name already exists directly under the given parent, returns it instead with `created: false` and creates nothing.
+- `drive_save_attachment(account, messageId, attachmentId, folderId, name?)` — saves a Gmail attachment straight into a Drive folder; the bytes go directly from Gmail to Drive, never through local disk. `folderId` is required, and the new file's description records the source account, message id, subject, sender, and date. Refuses, naming the existing file's id, when a file with the target name already exists in that folder, rather than overwriting it.
+- `drive_move_file(account, fileId, folderId?, name?)` — moves a Drive file to a different folder, renames it, or both in one call, removing it from every previous parent. Refuses when a file with the resulting name already exists in the target folder. Cannot copy the file or move it to a different account.
 
 ## Documentation
 
