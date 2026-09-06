@@ -294,16 +294,41 @@ async function callTool(
   return JSON.parse(result.content[0].text);
 }
 
-type FakeCall = { method: string; pathname: string; url: URL };
+type FakeCall = { method: string; pathname: string; url: URL; body?: string };
 type FakeRoute = { method: string; test: (pathname: string) => boolean; respond: (url: URL) => unknown };
+
+// googleapis sends a plain JSON requestBody as a string, but routes a
+// files.create call with `media` (drive_save_attachment's upload) as a
+// multipart/related body built from a Node Readable stream — gaxios pipes
+// the metadata part and the content part into it rather than handing fetch a
+// string. Reading it fully here is what lets a test assert on the metadata
+// JSON substring and the raw uploaded bytes.
+async function readBodyText(body: unknown): Promise<string | undefined> {
+  if (typeof body === "string") {
+    return body;
+  }
+  if (body && typeof (body as { pipe?: unknown }).pipe === "function") {
+    const chunks: Buffer[] = [];
+    for await (const chunk of body as AsyncIterable<Buffer | string>) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  }
+  return undefined;
+}
 
 function installFakeNetwork(routes: FakeRoute[]): { calls: FakeCall[] } {
   const calls: FakeCall[] = [];
   google.options({
-    fetchImplementation: async (url: unknown, opts?: { method?: string }) => {
+    fetchImplementation: async (url: unknown, opts?: { method?: string; body?: unknown }) => {
       const parsed = new URL(String(url));
       const method = (opts?.method ?? "GET").toUpperCase();
-      calls.push({ method, pathname: parsed.pathname, url: parsed });
+      const body = await readBodyText(opts?.body);
+      calls.push(
+        body === undefined
+          ? { method, pathname: parsed.pathname, url: parsed }
+          : { method, pathname: parsed.pathname, url: parsed, body },
+      );
 
       const route = routes.find((candidate) => candidate.method === method && candidate.test(parsed.pathname));
       if (!route) {
@@ -536,6 +561,243 @@ test("drive_create_folder with a token lacking the Drive scope refuses before an
       `expected error to end with "Nothing was changed.", got: ${result.error}`,
     );
     assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+// --- end-to-end: drive_save_attachment ---
+//
+// Fake Gmail routes mirror the real googleapis URL templates so the same
+// installFakeNetwork harness (and its recorded `calls`) proves the order of
+// operations: a bad or trashed folder must never cost a Gmail round trip,
+// and a name collision must never reach the upload.
+
+const SAVE_MESSAGE_ID = "msg1";
+const SAVE_ATTACHMENT_ID = "att1";
+const SAVE_ATTACHMENT_CONTENT = "%PDF-fake";
+const SAVE_FOLDER = { id: "folder1", name: "Reports", mimeType: FOLDER_MIME };
+const SAVE_TRASHED_FOLDER = { id: "trashed1", name: "Old", mimeType: FOLDER_MIME, trashed: true };
+const SAVE_NON_FOLDER = { id: "file1", name: "notes.txt", mimeType: "text/plain" };
+const SAVE_EXISTING_FILE = {
+  id: "existing-id",
+  name: "faktura.pdf",
+  mimeType: "application/pdf",
+  webViewLink: "https://drive.google.com/file/d/existing-id/view",
+};
+const SAVE_UPLOADED_FILE = {
+  id: "uploaded1",
+  name: "faktura.pdf",
+  mimeType: "application/pdf",
+  size: String(Buffer.byteLength(SAVE_ATTACHMENT_CONTENT)),
+};
+
+function saveMessageRoute(): FakeRoute {
+  return {
+    method: "GET",
+    test: (p) => p === `/gmail/v1/users/me/messages/${SAVE_MESSAGE_ID}`,
+    respond: () => ({
+      id: SAVE_MESSAGE_ID,
+      payload: {
+        headers: [
+          { name: "Subject", value: "Faktura wrzesien" },
+          { name: "From", value: "ksiegowa@example.com" },
+          { name: "Date", value: "Mon, 1 Sep 2025 10:00:00 +0000" },
+        ],
+        parts: [
+          {
+            filename: "faktura.pdf",
+            mimeType: "application/pdf",
+            body: { attachmentId: SAVE_ATTACHMENT_ID, size: Buffer.byteLength(SAVE_ATTACHMENT_CONTENT) },
+          },
+        ],
+      },
+    }),
+  };
+}
+
+function saveAttachmentRoute(): FakeRoute {
+  return {
+    method: "GET",
+    test: (p) => p === `/gmail/v1/users/me/messages/${SAVE_MESSAGE_ID}/attachments/${SAVE_ATTACHMENT_ID}`,
+    respond: () => ({
+      size: Buffer.byteLength(SAVE_ATTACHMENT_CONTENT),
+      data: Buffer.from(SAVE_ATTACHMENT_CONTENT).toString("base64url"),
+    }),
+  };
+}
+
+test("drive_save_attachment with a token lacking the Drive scope refuses before any network call", async () => {
+  setupAccountFixture(false);
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([]);
+
+    const result = await callTool(handlers, "drive_save_attachment", {
+      account: ACCOUNT,
+      messageId: SAVE_MESSAGE_ID,
+      attachmentId: SAVE_ATTACHMENT_ID,
+      folderId: "folder1",
+    });
+
+    assert.match(result.error as string, /npm run auth -- --account work/);
+    assert.ok(
+      (result.error as string).endsWith("Nothing was uploaded."),
+      `expected error to end with "Nothing was uploaded.", got: ${result.error}`,
+    );
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_save_attachment with an invalid explicit name refuses with no network calls", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([]);
+
+    const result = await callTool(handlers, "drive_save_attachment", {
+      account: ACCOUNT,
+      messageId: SAVE_MESSAGE_ID,
+      attachmentId: SAVE_ATTACHMENT_ID,
+      folderId: "folder1",
+      name: "a/b",
+    });
+
+    assert.match(result.error as string, /Nothing was uploaded\./);
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_save_attachment refuses a non-folder target before any Gmail call or upload", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === "/drive/v3/files/file1", respond: () => SAVE_NON_FOLDER },
+    ]);
+
+    const result = await callTool(handlers, "drive_save_attachment", {
+      account: ACCOUNT,
+      messageId: SAVE_MESSAGE_ID,
+      attachmentId: SAVE_ATTACHMENT_ID,
+      folderId: "file1",
+    });
+
+    assert.match(result.error as string, /is not a folder/);
+    assert.ok(
+      !calls.some((call) => call.pathname.startsWith("/gmail/")),
+      `expected no Gmail calls; calls were: ${JSON.stringify(calls)}`,
+    );
+    assert.ok(
+      !calls.some((call) => call.pathname === "/upload/drive/v3/files"),
+      `expected no upload call; calls were: ${JSON.stringify(calls)}`,
+    );
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_save_attachment refuses a trashed folder without uploading", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === "/drive/v3/files/trashed1", respond: () => SAVE_TRASHED_FOLDER },
+    ]);
+
+    const result = await callTool(handlers, "drive_save_attachment", {
+      account: ACCOUNT,
+      messageId: SAVE_MESSAGE_ID,
+      attachmentId: SAVE_ATTACHMENT_ID,
+      folderId: "trashed1",
+    });
+
+    assert.match(result.error as string, /in the trash/);
+    assert.ok(
+      !calls.some((call) => call.pathname === "/upload/drive/v3/files"),
+      `expected no upload call; calls were: ${JSON.stringify(calls)}`,
+    );
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_save_attachment refuses on a name collision, naming the existing file, without uploading", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === "/drive/v3/files/folder1", respond: () => SAVE_FOLDER },
+      { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: [SAVE_EXISTING_FILE] }) },
+      saveMessageRoute(),
+      saveAttachmentRoute(),
+    ]);
+
+    const result = await callTool(handlers, "drive_save_attachment", {
+      account: ACCOUNT,
+      messageId: SAVE_MESSAGE_ID,
+      attachmentId: SAVE_ATTACHMENT_ID,
+      folderId: "folder1",
+    });
+
+    assert.match(result.error as string, /existing-id/);
+    assert.match(result.error as string, /Nothing was uploaded\./);
+    assert.ok(
+      !calls.some((call) => call.method === "POST" && call.pathname === "/upload/drive/v3/files"),
+      `expected no upload call; calls were: ${JSON.stringify(calls)}`,
+    );
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_save_attachment uploads the attachment into the folder with no base64 in the result", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === "/drive/v3/files/folder1", respond: () => SAVE_FOLDER },
+      { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: [] }) },
+      saveMessageRoute(),
+      saveAttachmentRoute(),
+      { method: "POST", test: (p) => p === "/upload/drive/v3/files", respond: () => SAVE_UPLOADED_FILE },
+    ]);
+
+    const result = await callTool(handlers, "drive_save_attachment", {
+      account: ACCOUNT,
+      messageId: SAVE_MESSAGE_ID,
+      attachmentId: SAVE_ATTACHMENT_ID,
+      folderId: "folder1",
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal((result.file as { id: string }).id, "uploaded1");
+    assert.equal(
+      (result.sourceAttachment as { sizeBytes: number }).sizeBytes,
+      Buffer.byteLength(SAVE_ATTACHMENT_CONTENT),
+    );
+
+    const uploadCall = calls.find((call) => call.method === "POST" && call.pathname === "/upload/drive/v3/files");
+    assert.ok(uploadCall?.body, `expected an upload call carrying a body; calls were: ${JSON.stringify(calls)}`);
+    assert.match(uploadCall!.body!, /"parents":\["folder1"\]/);
+    assert.match(uploadCall!.body!, /faktura\.pdf/);
+    assert.match(uploadCall!.body!, new RegExp(`message ${SAVE_MESSAGE_ID}`));
+
+    const resultText = JSON.stringify(result);
+    assert.ok(
+      !resultText.includes(Buffer.from(SAVE_ATTACHMENT_CONTENT).toString("base64")),
+      "result JSON must not contain the attachment's base64 content",
+    );
   } finally {
     teardownAccountFixture();
   }

@@ -1,9 +1,12 @@
+import { Readable } from "node:stream";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { drive_v3 } from "googleapis";
+import type { drive_v3, gmail_v1 } from "googleapis";
 import { z } from "zod";
+import { downloadAttachment } from "./attachments.js";
 import {
   describeMissingDriveScope,
   driveForAccount,
+  gmailForAccount,
   isScopeInsufficientError,
   readAccountToken,
   tokenHasScope,
@@ -307,6 +310,59 @@ async function createFolder(
   return { folder: fileProjection(response.data), created: true };
 }
 
+// The spec this tool follows lists the collision check before the download.
+// It runs the other way here: the default target name is the attachment's
+// own (sanitised) filename, which only the download reveals, and fetching
+// the attachment twice just to learn its name first is wasteful. getFolder
+// still runs before any Gmail call, so a bad folder id never costs a Gmail
+// round trip either way.
+async function saveAttachmentToDrive(
+  drive: drive_v3.Drive,
+  gmail: gmail_v1.Gmail,
+  input: { account: string; messageId: string; attachmentId: string; folderId: string; name?: string },
+): Promise<{
+  file: FileProjection;
+  sourceMessageId: string;
+  sourceAttachment: { filename: string; mimeType: string; sizeBytes: number };
+}> {
+  await getFolder(drive, input.folderId, "Nothing was uploaded.");
+
+  const downloaded = await downloadAttachment(gmail, input.messageId, input.attachmentId);
+
+  const targetName = input.name ?? downloaded.filename;
+  const existing = await findByExactName(drive, targetName, input.folderId, undefined);
+  if (existing) {
+    throw new Error(
+      `A file named "${targetName}" already exists in that folder (id ${existing.id}, ${existing.webViewLink}). Pass a different name. Nothing was uploaded.`,
+    );
+  }
+
+  const description = provenanceDescription({
+    account: input.account,
+    messageId: input.messageId,
+    subject: downloaded.headers.subject,
+    from: downloaded.headers.from,
+    date: downloaded.headers.date,
+  });
+
+  const response = await drive.files.create({
+    requestBody: { name: targetName, parents: [input.folderId], description },
+    media: { mimeType: downloaded.mimeType, body: Readable.from(downloaded.content) },
+    fields: FILE_FIELDS,
+    supportsAllDrives: true,
+  });
+
+  return {
+    file: fileProjection(response.data),
+    sourceMessageId: input.messageId,
+    sourceAttachment: {
+      filename: downloaded.filename,
+      mimeType: downloaded.mimeType,
+      sizeBytes: downloaded.content.byteLength,
+    },
+  };
+}
+
 export function registerDriveTools(server: McpServer): void {
   server.tool(
     "drive_list_files",
@@ -351,6 +407,33 @@ export function registerDriveTools(server: McpServer): void {
         return await driveScopeAware(account, "Nothing was changed.", async () => {
           const drive = await driveForAccount(account);
           return await createFolder(drive, { name, parentId: parentId ?? "root" });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_save_attachment",
+    "Save a Gmail attachment straight into a Google Drive folder — the bytes go directly from Gmail to Drive, never through local disk and never back in the tool result. Refuses when a file with the target name already exists in that folder rather than overwriting it. Cannot delete anything, and cannot upload a local file: only an attachment already on a Gmail message.",
+    {
+      ...accountShape,
+      messageId: z.string().min(1).describe("Gmail message id the attachment is on."),
+      attachmentId: z.string().min(1).describe("Attachment id, from gmail_read_message."),
+      folderId: z.string().min(1).describe("Destination Drive folder id."),
+      name: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Drive file name. Defaults to the attachment's own (sanitised) filename."),
+    },
+    async ({ account, messageId, attachmentId, folderId, name }) =>
+      safeTool(async () => {
+        return await driveScopeAware(account, "Nothing was uploaded.", async () => {
+          if (name !== undefined) {
+            assertDriveName(name, "Nothing was uploaded.");
+          }
+          const drive = await driveForAccount(account);
+          const gmail = await gmailForAccount(account);
+          return await saveAttachmentToDrive(drive, gmail, { account, messageId, attachmentId, folderId, name });
         });
       }, account),
   );
