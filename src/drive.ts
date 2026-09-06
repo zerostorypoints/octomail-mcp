@@ -153,14 +153,7 @@ export function missingDriveScope(token: { scope?: string | null }, account: str
   return tokenHasScope(token, DRIVE_SCOPE) === false ? describeMissingDriveScope(account) : undefined;
 }
 
-export function assertDriveScope(account: string): void {
-  const message = missingDriveScope(readAccountToken(account), account);
-  if (message) {
-    throw new Error(message);
-  }
-}
-
-// Wraps every Drive call: assertDriveScope is a preflight check against the
+// Wraps every Drive call: missingDriveScope is a preflight check against the
 // token's own recorded scope string, so an account authorized before Drive
 // access was requested is refused with no network call at all. The catch
 // covers the case where the token claims the scope but Google still answers
@@ -248,7 +241,7 @@ export async function getFile(drive: drive_v3.Drive, fileId: string, outcome: st
 }
 
 const FILE_FIELDS = "id,name,mimeType,size,modifiedTime,parents,webViewLink,md5Checksum";
-const LIST_FIELDS = `nextPageToken, files(${FILE_FIELDS})`;
+const LIST_FIELDS = `nextPageToken, incompleteSearch, files(${FILE_FIELDS})`;
 
 // Shared with Tasks 5 and 6 (move/rename) to check for a name collision
 // before writing. pageSize: 2 is enough to distinguish "one match" from "more
@@ -287,7 +280,7 @@ type ListFilesInput = {
 async function listFiles(
   drive: drive_v3.Drive,
   input: ListFilesInput,
-): Promise<{ files: FileProjection[]; nextPageToken?: string }> {
+): Promise<{ files: FileProjection[]; nextPageToken?: string; incompleteSearch?: true }> {
   const foldersOnly = input.foldersOnly ?? false;
   // folderId defaults to "root" only in this branch — when nameContains is
   // given, assertListInput has already ruled out folderId being set too, and
@@ -309,7 +302,14 @@ async function listFiles(
   });
 
   const files = (response.data.files ?? []).map(fileProjection);
-  return response.data.nextPageToken ? { files, nextPageToken: response.data.nextPageToken } : { files };
+  const result: { files: FileProjection[]; nextPageToken?: string; incompleteSearch?: true } = { files };
+  if (response.data.nextPageToken) {
+    result.nextPageToken = response.data.nextPageToken;
+  }
+  if (response.data.incompleteSearch) {
+    result.incompleteSearch = true;
+  }
+  return result;
 }
 
 async function createFolder(
@@ -352,6 +352,7 @@ async function saveAttachmentToDrive(
   const downloaded = await downloadAttachment(gmail, input.messageId, input.attachmentId);
 
   const targetName = input.name ?? downloaded.filename;
+  assertDriveName(targetName, "Nothing was uploaded.");
   const existing = await findByExactName(drive, targetName, input.folderId, undefined);
   if (existing) {
     throw new Error(
@@ -420,7 +421,9 @@ async function moveFile(
   };
   if (input.folderId !== undefined) {
     updateParams.addParents = input.folderId;
-    updateParams.removeParents = previousParents.join(",");
+    if (previousParents.length > 0) {
+      updateParams.removeParents = previousParents.join(",");
+    }
   }
   if (input.name !== undefined) {
     updateParams.requestBody = { name: input.name };

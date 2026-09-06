@@ -10,7 +10,6 @@ import { DRIVE_SCOPE } from "./gmail.js";
 import {
   FOLDER_MIME,
   assertDriveName,
-  assertDriveScope,
   assertListInput,
   assertMoveInput,
   childrenQuery,
@@ -250,12 +249,6 @@ test("missingDriveScope returns undefined when scope is absent", () => {
   assert.equal(message, undefined);
 });
 
-// --- assertDriveScope ---
-
-test("assertDriveScope is exported as a function", () => {
-  assert.equal(typeof assertDriveScope, "function");
-});
-
 // --- end-to-end: registerDriveTools against a fake Drive network ---
 //
 // Same fake-fetch harness as src/gate.test.ts (test files in this repo do not
@@ -439,6 +432,31 @@ test("drive_list_files lists a folder's children with all-drives params and the 
     assert.match(q, /trashed = false/);
     assert.equal(listCall!.url.searchParams.get("supportsAllDrives"), "true");
     assert.equal(listCall!.url.searchParams.get("includeItemsFromAllDrives"), "true");
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_list_files surfaces incompleteSearch: true when Drive returns it", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    installFakeNetwork([
+      {
+        method: "GET",
+        test: (p) => p === "/drive/v3/files",
+        respond: () => ({ files: [FOLDER_A], incompleteSearch: true }),
+      },
+    ]);
+
+    const result = await callTool(handlers, "drive_list_files", {
+      account: ACCOUNT,
+      folderId: "folder1",
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.incompleteSearch, true);
   } finally {
     teardownAccountFixture();
   }
@@ -792,6 +810,7 @@ test("drive_save_attachment uploads the attachment into the folder with no base6
     assert.match(uploadCall!.body!, /"parents":\["folder1"\]/);
     assert.match(uploadCall!.body!, /faktura\.pdf/);
     assert.match(uploadCall!.body!, new RegExp(`message ${SAVE_MESSAGE_ID}`));
+    assert.match(uploadCall!.body!, /%PDF-fake/);
 
     const resultText = JSON.stringify(result);
     assert.ok(
@@ -872,6 +891,38 @@ test("drive_move_file moves a file into a new folder", async () => {
     assert.ok(patchCall, `expected a PATCH to /drive/v3/files/${MOVE_FILE_ID}; calls were: ${JSON.stringify(calls)}`);
     assert.equal(patchCall!.url.searchParams.get("addParents"), MOVE_NEW_FOLDER.id);
     assert.equal(patchCall!.url.searchParams.get("removeParents"), MOVE_OLD_PARENT);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_move_file moving a parentless file omits removeParents entirely", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === `/drive/v3/files/${MOVE_FILE_ID}`, respond: () => MOVE_FILE_NO_PARENTS },
+      { method: "GET", test: (p) => p === `/drive/v3/files/${MOVE_NEW_FOLDER.id}`, respond: () => MOVE_NEW_FOLDER },
+      { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: [] }) },
+      { method: "PATCH", test: (p) => p === `/drive/v3/files/${MOVE_FILE_ID}`, respond: () => MOVE_UPDATED_FILE },
+    ]);
+
+    const result = await callTool(handlers, "drive_move_file", {
+      account: ACCOUNT,
+      fileId: MOVE_FILE_ID,
+      folderId: MOVE_NEW_FOLDER.id,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.deepEqual(result.previousParents, []);
+
+    const patchCall = calls.find(
+      (call) => call.method === "PATCH" && call.pathname === `/drive/v3/files/${MOVE_FILE_ID}`,
+    );
+    assert.ok(patchCall, `expected a PATCH to /drive/v3/files/${MOVE_FILE_ID}; calls were: ${JSON.stringify(calls)}`);
+    assert.equal(patchCall!.url.searchParams.get("addParents"), MOVE_NEW_FOLDER.id);
+    assert.equal(patchCall!.url.searchParams.get("removeParents"), null);
   } finally {
     teardownAccountFixture();
   }
