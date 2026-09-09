@@ -863,6 +863,62 @@ async function trashFiles(
   return { rows, trashed, wouldTrash, refused, note };
 }
 
+// --- drive_move_files: batch form of drive_move_file ---
+
+export const MOVE_BATCH_MAX = 100;
+
+export type MoveBatchRow =
+  | { fileId: string; folderId?: string; name?: string; status: "moved"; file: FileProjection; previousParents: string[]; previousName: string }
+  | { fileId: string; folderId?: string; name?: string; status: "refused"; error: string };
+
+// Same shape as the trash batch: each row runs the full single-file path
+// (input check, name check, source lookup, target lookup, collision check,
+// one files.update), rows go in order, and a refused row is reported and
+// skipped rather than stopping the rest. Two rows with the same fileId are
+// refused up front, before any network call, because the second would act
+// on the result of the first.
+export function assertMoveBatchInput(items: { fileId: string; folderId?: string; name?: string }[], outcome: string): void {
+  if (items.length === 0) {
+    throw new Error(`items is empty. ${outcome}`);
+  }
+  if (items.length > MOVE_BATCH_MAX) {
+    throw new Error(`items has ${items.length} rows; the cap is ${MOVE_BATCH_MAX} per call. Split the list. ${outcome}`);
+  }
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (seen.has(item.fileId)) {
+      throw new Error(`fileId ${item.fileId} appears more than once in items. ${outcome}`);
+    }
+    seen.add(item.fileId);
+  }
+}
+
+async function moveFiles(
+  drive: drive_v3.Drive,
+  items: { fileId: string; folderId?: string; name?: string }[],
+): Promise<{ rows: MoveBatchRow[]; moved: number; refused: number; note: string }> {
+  const rows: MoveBatchRow[] = [];
+  for (const item of items) {
+    try {
+      assertMoveInput(item);
+      if (item.name !== undefined) {
+        assertDriveName(item.name);
+      }
+      const result = await moveFile(drive, item);
+      rows.push({ ...item, status: "moved", ...result });
+    } catch (error) {
+      rows.push({ ...item, status: "refused", error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  const moved = rows.filter((row) => row.status === "moved").length;
+  return {
+    rows,
+    moved,
+    refused: rows.length - moved,
+    note: `${moved} moved or renamed, ${rows.length - moved} refused and left where they were.`,
+  };
+}
+
 // --- drive_export_file: readers and orchestration ---
 
 const SHEET_TABS_FIELDS = "sheets.properties(title,index,sheetId,gridProperties(rowCount,columnCount))";
@@ -1092,6 +1148,33 @@ export function registerDriveTools(server: McpServer): void {
           }
           const drive = await driveForAccount(account);
           return await moveFile(drive, { fileId, folderId, name });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_move_files",
+    "Batch form of drive_move_file: up to 100 {fileId, folderId?, name?} rows in one call, processed in order, one result row per item with the same checks as the single tool (a name collision in the target folder, a missing target, a trashed source each refuse that row only; the others proceed). Cannot delete, copy, or move to another account.",
+    {
+      ...accountShape,
+      items: z
+        .array(
+          z.object({
+            fileId: z.string().min(1).describe("Drive file id to move or rename."),
+            folderId: z.string().min(1).optional().describe("Destination folder id. Omit to rename without moving."),
+            name: z.string().min(1).optional().describe("New file name. Omit to move without renaming."),
+          }),
+        )
+        .min(1)
+        .max(MOVE_BATCH_MAX)
+        .describe("The rows to move, rename, or both."),
+    },
+    async ({ account, items }) =>
+      safeTool(async () => {
+        return await driveScopeAware(account, "Nothing was changed.", async () => {
+          assertMoveBatchInput(items, "Nothing was changed.");
+          const drive = await driveForAccount(account);
+          return await moveFiles(drive, items);
         });
       }, account),
   );

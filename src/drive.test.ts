@@ -2340,3 +2340,82 @@ test("drive_trash_file preview reports the owners without writing", async () => 
     teardownAccountFixture();
   }
 });
+
+// --- end-to-end: drive_move_files (batch) ---
+
+const MB_TARGET = { id: "mbt", name: "Target", mimeType: FOLDER_MIME };
+const MB_A = { id: "ma", name: "a.pdf", mimeType: "application/pdf", parents: ["old"] };
+const MB_B = { id: "mb", name: "b.pdf", mimeType: "application/pdf", parents: ["old"] };
+const MB_C = { id: "mc", name: "c.pdf", mimeType: "application/pdf", parents: ["old"] };
+
+function moveBatchRoutes(existingInTarget: unknown[] = []): FakeRoute[] {
+  const byId: Record<string, unknown> = { ma: MB_A, mb: MB_B, mc: MB_C, mbt: MB_TARGET };
+  return [
+    { method: "GET", test: (p) => /^\/drive\/v3\/files\/m[abc]$/.test(p) || p === `/drive/v3/files/${MB_TARGET.id}`, respond: (url) => byId[url.pathname.split("/").pop()!] },
+    { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: existingInTarget }) },
+    { method: "PATCH", test: (p) => /^\/drive\/v3\/files\/m[abc]$/.test(p), respond: (url) => ({ ...(byId[url.pathname.split("/").pop()!] as object), parents: [MB_TARGET.id] }) },
+  ];
+}
+
+test("drive_move_files refuses duplicate ids before any network call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(moveBatchRoutes());
+    const result = await callTool(handlers, "drive_move_files", {
+      account: ACCOUNT,
+      items: [{ fileId: "ma", folderId: MB_TARGET.id }, { fileId: "ma", folderId: MB_TARGET.id }],
+    });
+    assert.match(result.error as string, /appears more than once/);
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_move_files moves the good rows and reports a bad row without stopping", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(moveBatchRoutes());
+    const result = await callTool(handlers, "drive_move_files", {
+      account: ACCOUNT,
+      items: [
+        { fileId: "ma", folderId: MB_TARGET.id },
+        { fileId: "mb" },
+        { fileId: "mc", folderId: MB_TARGET.id, name: "a/b.pdf" },
+      ],
+    });
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.moved, 1);
+    assert.equal(result.refused, 2);
+    const rows = result.rows as { fileId: string; status: string; error?: string; previousParents?: string[] }[];
+    assert.deepEqual(rows.map((r) => [r.fileId, r.status]), [["ma", "moved"], ["mb", "refused"], ["mc", "refused"]]);
+    assert.deepEqual(rows[0].previousParents, ["old"]);
+    assert.match(rows[1].error!, /Pass folderId to move, name to rename, or both/);
+    assert.match(rows[2].error!, /cannot contain "\/"/);
+    const patches = calls.filter((call) => call.method === "PATCH");
+    assert.deepEqual(patches.map((call) => call.pathname), ["/drive/v3/files/ma"]);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_move_files refuses a row whose target already holds the name and moves the rest", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    installFakeNetwork(moveBatchRoutes([{ id: "clash", name: "a.pdf", mimeType: "application/pdf", webViewLink: "https://x/clash" }]));
+    const result = await callTool(handlers, "drive_move_files", {
+      account: ACCOUNT,
+      items: [{ fileId: "ma", folderId: MB_TARGET.id }],
+    });
+    assert.equal(result.refused, 1);
+    assert.match((result.rows as { error: string }[])[0].error, /already exists in that folder/);
+  } finally {
+    teardownAccountFixture();
+  }
+});
