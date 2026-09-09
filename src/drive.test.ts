@@ -2266,3 +2266,77 @@ test("drive_trash_files with confirm trashes the good rows and reports the bad o
     teardownAccountFixture();
   }
 });
+
+// --- drive_trash_file: NFC/NFD names and owner-aware refusals ---
+
+const TRASH_NFD = { id: TRASH_ID, name: "Załącznik 1.pdf".normalize("NFD"), mimeType: "application/pdf", parents: ["p1"], owners: [{ emailAddress: "office@example.com" }] };
+const TRASH_OWNED_ELSEWHERE = { ...TRASH_FILE, owners: [{ emailAddress: "anna@example.com" }] };
+
+test("drive_trash_file accepts an NFC expectedName for a file Drive stores in NFD", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_NFD));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: "Załącznik 1.pdf".normalize("NFC"),
+      confirm: true,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.trashed, true);
+    assert.deepEqual(result.owners, ["office@example.com"]);
+    assert.ok(trashCall(calls));
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file names the owner when Drive refuses the trash with 403", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    installFakeNetwork([
+      { method: "GET", test: (p) => p === TRASH_PATH, respond: () => TRASH_OWNED_ELSEWHERE },
+      { method: "PATCH", test: (p) => p === TRASH_PATH, respond: () => fakeReply(403, { error: { code: 403, message: "The user does not have sufficient permissions for this file." } }) },
+    ]);
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FILE.name,
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /owned by anna@example\.com/);
+    assert.match(result.error as string, /only its owner can move it to the trash/);
+    assert.match(result.error as string, /Nothing was trashed\.$/);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file preview reports the owners without writing", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_OWNED_ELSEWHERE));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FILE.name,
+    });
+
+    assert.equal(result.wouldTrash, true);
+    assert.deepEqual(result.owners, ["anna@example.com"]);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
