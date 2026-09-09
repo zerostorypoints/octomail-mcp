@@ -817,8 +817,8 @@ function isForbiddenError(error: unknown): boolean {
 export const TRASH_BATCH_MAX = 100;
 
 export type TrashBatchRow =
-  | { fileId: string; expectedName: string; status: "trashed"; file: FileProjection; isFolder: boolean }
-  | { fileId: string; expectedName: string; status: "wouldTrash"; file: FileProjection; isFolder: boolean }
+  | { fileId: string; expectedName: string; status: "trashed"; file: FileProjection; isFolder: boolean; owners: string[] }
+  | { fileId: string; expectedName: string; status: "wouldTrash"; file: FileProjection; isFolder: boolean; owners: string[] }
   | { fileId: string; expectedName: string; status: "refused"; error: string };
 
 export function assertTrashBatchInput(items: { fileId: string; expectedName: string }[], outcome: string): void {
@@ -846,9 +846,9 @@ async function trashFiles(
     try {
       const result = await trashFile(drive, { ...item, confirm: input.confirm, confirmFolder: input.confirmFolder });
       if ("trashed" in result) {
-        rows.push({ ...item, status: "trashed", file: result.file, isFolder: result.isFolder });
+        rows.push({ ...item, status: "trashed", file: result.file, isFolder: result.isFolder, owners: result.owners });
       } else {
-        rows.push({ ...item, status: "wouldTrash", file: result.file, isFolder: result.isFolder });
+        rows.push({ ...item, status: "wouldTrash", file: result.file, isFolder: result.isFolder, owners: result.owners });
       }
     } catch (error) {
       rows.push({ ...item, status: "refused", error: error instanceof Error ? error.message : String(error) });
