@@ -716,7 +716,11 @@ export function assertTrashPreconditions(
   input: { expectedName: string; confirm?: boolean; confirmFolder?: boolean },
   outcome: string,
 ): { wouldTrash: true; file: FileProjection; isFolder: boolean } | undefined {
-  if (file.name !== input.expectedName) {
+  // Names are compared after NFC normalisation: Drive stores what the
+  // uploading client sent, and a macOS upload carries decomposed accents
+  // (NFD, "ł" as "l" + combining stroke) while a name typed or copied
+  // elsewhere is precomposed (NFC). Both spell the same file name.
+  if (file.name.normalize("NFC") !== input.expectedName.normalize("NFC")) {
     throw new Error(
       `File ${file.id} is named "${file.name}", not "${input.expectedName}". The id and the expected name do not match; check the id. ${outcome}`,
     );
@@ -737,33 +741,70 @@ async function trashFile(
   drive: drive_v3.Drive,
   input: { fileId: string; expectedName: string; confirm?: boolean; confirmFolder?: boolean },
 ): Promise<
-  | { wouldTrash: true; file: FileProjection; isFolder: boolean; note: string }
-  | { trashed: true; file: FileProjection; isFolder: boolean; note: string }
+  | { wouldTrash: true; file: FileProjection; isFolder: boolean; owners: string[]; note: string }
+  | { trashed: true; file: FileProjection; isFolder: boolean; owners: string[]; note: string }
 > {
   const outcome = "Nothing was trashed.";
-  const file = await getFile(drive, input.fileId, outcome);
+  const { file, owners } = await getFileForTrash(drive, input.fileId, outcome);
 
   const preview = assertTrashPreconditions(file, input, outcome);
   if (preview) {
     return {
       ...preview,
+      owners,
       note: "Nothing was trashed. Repeat the call with confirm: true to move this file to the Drive trash.",
     };
   }
 
-  const response = await drive.files.update({
-    fileId: input.fileId,
-    requestBody: { trashed: true },
-    fields: `${FILE_FIELDS},trashed`,
-    supportsAllDrives: true,
-  });
+  let response: { data: drive_v3.Schema$File };
+  try {
+    response = await drive.files.update({
+      fileId: input.fileId,
+      requestBody: { trashed: true },
+      fields: `${FILE_FIELDS},trashed`,
+      supportsAllDrives: true,
+    });
+  } catch (error) {
+    // Only an owner (or an organiser on a shared drive) may trash a file;
+    // an editor who is not the owner gets a 403. Naming the owner turns
+    // "insufficient permissions" into an action: transfer ownership, or ask
+    // the owner.
+    if (isForbiddenError(error)) {
+      throw new Error(
+        `File ${file.id} ("${file.name}") is owned by ${owners.length ? owners.join(", ") : "another account"}, and only its owner can move it to the trash. Transfer ownership to this account or ask the owner. ${outcome}`,
+      );
+    }
+    throw error;
+  }
 
   return {
     trashed: true,
     file: fileProjection(response.data),
     isFolder: file.mimeType === FOLDER_MIME,
+    owners,
     note: "Moved to the Drive trash, where Drive keeps it for 30 days and it can be restored. Nothing is permanently deleted by this server.",
   };
+}
+
+// The trash lookup also fetches the owners, so the preview shows who owns
+// the file before anything is attempted, and a permission refusal can name
+// them.
+export async function getFileForTrash(
+  drive: drive_v3.Drive,
+  fileId: string,
+  outcome: string,
+): Promise<{ file: FileProjection; owners: string[] }> {
+  const raw = await getDriveFileForCheck(drive, fileId, outcome, "File", `${CHECK_FIELDS},owners(emailAddress)`);
+  const owners = (raw.owners ?? []).map((owner) => owner.emailAddress).filter((email): email is string => Boolean(email));
+  return { file: fileProjection(raw), owners };
+}
+
+function isForbiddenError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: unknown; status?: unknown; response?: { status?: unknown } };
+  return candidate.code === 403 || candidate.status === 403 || candidate.response?.status === 403;
 }
 
 // Batch form of the same operation for a list the user has accepted: one call,
