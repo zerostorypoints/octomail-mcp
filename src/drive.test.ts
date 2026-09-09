@@ -1982,3 +1982,195 @@ test("drive_copy_file passes supportsAllDrives=true on every request it makes", 
     teardownAccountFixture();
   }
 });
+
+// --- end-to-end: drive_trash_file ---
+//
+// Same fake-fetch harness. The write is one PATCH with {trashed: true}; every
+// refusal and the confirm-less preview must leave the recorded calls free of
+// anything but GET.
+
+const TRASH_ID = "t1";
+const TRASH_PATH = `/drive/v3/files/${TRASH_ID}`;
+const TRASH_FILE = { id: TRASH_ID, name: "PO_12_stare.pdf", mimeType: "application/pdf", parents: ["p1"] };
+const TRASH_FOLDER = { id: TRASH_ID, name: "Podpisane", mimeType: FOLDER_MIME, parents: ["p1"] };
+const TRASH_FILE_TRASHED = { ...TRASH_FILE, trashed: true };
+const TRASH_RESULT = { ...TRASH_FILE, trashed: true, webViewLink: "https://drive.google.com/file/d/t1/view" };
+
+function trashRoutes(file: unknown): FakeRoute[] {
+  return [
+    { method: "GET", test: (p) => p === TRASH_PATH, respond: () => file },
+    { method: "PATCH", test: (p) => p === TRASH_PATH, respond: () => TRASH_RESULT },
+  ];
+}
+
+function trashCall(calls: FakeCall[]): FakeCall | undefined {
+  return calls.find((call) => call.method === "PATCH" && call.pathname === TRASH_PATH);
+}
+
+test("drive_trash_file with a token lacking the Drive scope refuses before any network call", async () => {
+  setupAccountFixture(false);
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FILE));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FILE.name,
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /Nothing was trashed\.$/);
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file without confirm returns a preview and writes nothing", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FILE));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FILE.name,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.wouldTrash, true);
+    assert.equal(result.trashed, undefined);
+    assert.equal((result.file as { name: string }).name, TRASH_FILE.name);
+    assert.match(result.note as string, /confirm: true/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file refuses when expectedName differs from the file's name, even with confirm", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FILE));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: "PO_12_inny.pdf",
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /is named "PO_12_stare\.pdf", not "PO_12_inny\.pdf"/);
+    assert.match(result.error as string, /Nothing was trashed\.$/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file refuses a file already in the trash", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FILE_TRASHED));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FILE.name,
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /in the trash/);
+    assert.match(result.error as string, /Nothing was trashed\.$/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file refuses a folder without confirmFolder", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FOLDER));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FOLDER.name,
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /is a folder; trashing it trashes everything inside it/);
+    assert.match(result.error as string, /Nothing was trashed\.$/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file with confirm sends one PATCH with trashed=true and nothing else", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FILE));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FILE.name,
+      confirm: true,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.trashed, true);
+    assert.equal(result.isFolder, false);
+    assert.match(result.note as string, /30 days/);
+
+    const patch = trashCall(calls);
+    assert.ok(patch, `expected a PATCH to ${TRASH_PATH}; calls were: ${JSON.stringify(calls)}`);
+    assert.deepEqual(JSON.parse(patch!.body ?? "{}"), { trashed: true });
+    assert.equal(patch!.url.searchParams.get("supportsAllDrives"), "true");
+    assert.ok(
+      !calls.some((call) => call.method === "DELETE"),
+      `expected no DELETE; calls were: ${JSON.stringify(calls)}`,
+    );
+    assert.equal(calls.filter((call) => call.method !== "GET").length, 1);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file trashes a folder when both confirm and confirmFolder are true", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FOLDER));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FOLDER.name,
+      confirm: true,
+      confirmFolder: true,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.trashed, true);
+    assert.equal(result.isFolder, true);
+    assert.ok(trashCall(calls));
+  } finally {
+    teardownAccountFixture();
+  }
+});

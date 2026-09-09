@@ -696,6 +696,76 @@ async function copyFile(
   return { file: fileProjection(response.data), sourceFileId: input.fileId };
 }
 
+// --- drive_trash_file ---
+
+// The one Drive tool that removes anything, and it only ever moves a file to
+// the trash: files.update with trashed=true, which Drive undoes from the
+// trash for 30 days. There is no permanent delete and no emptyTrash here,
+// and there never will be a second flag that turns this into one.
+//
+// Two guards sit in front of the write. `expectedName` must equal the file's
+// current name exactly, so a wrong or stale id (Drive ids are opaque; a
+// deletion list built yesterday can point at a file renamed today) is
+// refused rather than acted on. `confirm` must be true, otherwise the call
+// returns the file it would trash and changes nothing, so the decision is
+// made against the real name, type and parents. A folder needs
+// `confirmFolder: true` on top, because trashing a folder takes everything
+// inside it along.
+export function assertTrashPreconditions(
+  file: FileProjection,
+  input: { expectedName: string; confirm?: boolean; confirmFolder?: boolean },
+  outcome: string,
+): { wouldTrash: true; file: FileProjection; isFolder: boolean } | undefined {
+  if (file.name !== input.expectedName) {
+    throw new Error(
+      `File ${file.id} is named "${file.name}", not "${input.expectedName}". The id and the expected name do not match; check the id. ${outcome}`,
+    );
+  }
+  const isFolder = file.mimeType === FOLDER_MIME;
+  if (!input.confirm) {
+    return { wouldTrash: true, file, isFolder };
+  }
+  if (isFolder && !input.confirmFolder) {
+    throw new Error(
+      `File ${file.id} ("${file.name}") is a folder; trashing it trashes everything inside it. Repeat the call with confirmFolder: true if that is intended. ${outcome}`,
+    );
+  }
+  return undefined;
+}
+
+async function trashFile(
+  drive: drive_v3.Drive,
+  input: { fileId: string; expectedName: string; confirm?: boolean; confirmFolder?: boolean },
+): Promise<
+  | { wouldTrash: true; file: FileProjection; isFolder: boolean; note: string }
+  | { trashed: true; file: FileProjection; isFolder: boolean; note: string }
+> {
+  const outcome = "Nothing was trashed.";
+  const file = await getFile(drive, input.fileId, outcome);
+
+  const preview = assertTrashPreconditions(file, input, outcome);
+  if (preview) {
+    return {
+      ...preview,
+      note: "Nothing was trashed. Repeat the call with confirm: true to move this file to the Drive trash.",
+    };
+  }
+
+  const response = await drive.files.update({
+    fileId: input.fileId,
+    requestBody: { trashed: true },
+    fields: `${FILE_FIELDS},trashed`,
+    supportsAllDrives: true,
+  });
+
+  return {
+    trashed: true,
+    file: fileProjection(response.data),
+    isFolder: file.mimeType === FOLDER_MIME,
+    note: "Moved to the Drive trash, where Drive keeps it for 30 days and it can be restored. Nothing is permanently deleted by this server.",
+  };
+}
+
 // --- drive_export_file: readers and orchestration ---
 
 const SHEET_TABS_FIELDS = "sheets.properties(title,index,sheetId,gridProperties(rowCount,columnCount))";
@@ -946,6 +1016,31 @@ export function registerDriveTools(server: McpServer): void {
           }
           const drive = await driveForAccount(account);
           return await copyFile(drive, { fileId, targetFolderId, newName, copiedAt: new Date().toISOString() });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_trash_file",
+    "Move one Google Drive file or folder to the Drive trash (files.update with trashed=true), where Drive keeps it for 30 days and it can be restored. Never a permanent delete: this server has no files.delete and no emptyTrash. Two guards: expectedName must equal the file's current name exactly, so a wrong or stale id is refused; and without confirm: true the call changes nothing and returns the file it would trash. A folder additionally needs confirmFolder: true, because trashing a folder trashes its contents. Refuses a file that is already in the trash.",
+    {
+      ...accountShape,
+      fileId: z.string().min(1).describe("Drive file or folder id to trash."),
+      expectedName: z
+        .string()
+        .min(1)
+        .describe("The file's current name, exactly. Refused when it differs from the name Drive reports for fileId."),
+      confirm: z.boolean().optional().describe("Must be true to trash. Omitted or false: returns what would be trashed and changes nothing."),
+      confirmFolder: z
+        .boolean()
+        .optional()
+        .describe("Required in addition to confirm when fileId is a folder; trashing a folder trashes everything inside it."),
+    },
+    async ({ account, fileId, expectedName, confirm, confirmFolder }) =>
+      safeTool(async () => {
+        return await driveScopeAware(account, "Nothing was trashed.", async () => {
+          const drive = await driveForAccount(account);
+          return await trashFile(drive, { fileId, expectedName, confirm, confirmFolder });
         });
       }, account),
   );
