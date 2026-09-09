@@ -12,7 +12,7 @@ This MCP server talks to the Gmail API on your behalf using these OAuth scopes:
 | `gmail.settings.basic` | List, create, and delete filters |
 | `calendar.readonly` | List calendars and events |
 | `calendar.events` | Create, update, and delete events via `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`; answer invitations via `calendar_respond_to_event`; also covers a planned busy-block sync between calendars, which has no tool yet |
-| `drive` | List folders and files, create folders, upload a Gmail attachment, move or rename; full scope because `drive.file` cannot see folders the app did not create |
+| `drive` | List folders and files, create folders, upload a Gmail attachment, move or rename, read a Google Sheet or Doc as text (the Sheets API accepts this scope); full scope because `drive.file` cannot see folders the app did not create |
 
 Four registered tools write to a calendar: `calendar_create_event`, `calendar_update_event`,
 `calendar_delete_event`, and `calendar_respond_to_event`. Of those, `calendar_respond_to_event`
@@ -37,9 +37,13 @@ Beyond those four tools, `calendar.events` also covers a planned busy-block sync
 between calendars, which still has no tool; a granted scope does nothing by itself,
 only a registered tool that calls it can act.
 
-The four Drive tools can list folders and files, create a folder, upload a Gmail
-attachment into a folder, and move or rename a file. No Drive tool deletes, trashes,
-shares, or reads file content. `drive_save_attachment` and `drive_move_file` each
+The five Drive tools can list folders and files, create a folder, upload a Gmail
+attachment into a folder, move or rename a file, and read a Google Sheet or Doc as
+text. No Drive tool deletes, trashes, or shares. One, `drive_export_file`, reads
+content, and only the rendered text of a Google Sheet or Google Doc: it refuses every
+other mime type before any content request, so no binary file on Drive can be pulled
+through this server. Its result is capped at 200 KB; a larger export is written into
+the account's download directory under a fresh name. `drive_save_attachment` and `drive_move_file` each
 refuse rather than overwrite when a file of the target name already exists in the
 destination folder. The restriction above is the tool surface, not the token: the
 granted scope is full `drive`, which permits delete, trash, share, and read of every

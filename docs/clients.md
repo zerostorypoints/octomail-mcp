@@ -81,3 +81,7 @@ Read thread THREAD_ID from account work.
 ```text
 Archive these message IDs in account support: ...
 ```
+
+```text
+Export the tab "stare wpisy" of the Google Sheet with id 1AbC... from account work as CSV.
+```
