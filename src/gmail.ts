@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { google, gmail_v1, calendar_v3, drive_v3 } from "googleapis";
+import { google, gmail_v1, calendar_v3, drive_v3, sheets_v4 } from "googleapis";
 import { Credentials, OAuth2Client } from "google-auth-library";
 import { getAccountConfig, loadOAuthCredentials } from "./config.js";
 
@@ -71,6 +71,15 @@ export async function driveForAccount(account: string): Promise<drive_v3.Drive> 
   const oauth2Client = createOAuthClient();
   oauth2Client.setCredentials(token);
   return google.drive({ version: "v3", auth: oauth2Client });
+}
+
+// The Sheets API accepts the Drive scope, so the same token serves it; only
+// drive_export_file uses this client, for two read methods.
+export async function sheetsForAccount(account: string): Promise<sheets_v4.Sheets> {
+  const token = readAccountToken(account);
+  const oauth2Client = createOAuthClient();
+  oauth2Client.setCredentials(token);
+  return google.sheets({ version: "v4", auth: oauth2Client });
 }
 
 export async function listLabelsByName(gmail: gmail_v1.Gmail): Promise<Map<string, string>> {

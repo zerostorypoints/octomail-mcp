@@ -1,14 +1,17 @@
+import fs from "node:fs";
 import { Readable } from "node:stream";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { drive_v3, gmail_v1 } from "googleapis";
+import type { drive_v3, gmail_v1, sheets_v4 } from "googleapis";
 import { z } from "zod";
-import { downloadAttachment } from "./attachments.js";
+import { downloadAttachment, sanitizeAttachmentFilename, writeAttachmentFileExclusive } from "./attachments.js";
+import { downloadDir } from "./config.js";
 import {
   describeMissingDriveScope,
   driveForAccount,
   gmailForAccount,
   isScopeInsufficientError,
   readAccountToken,
+  sheetsForAccount,
   tokenHasScope,
   DRIVE_SCOPE,
 } from "./gmail.js";
@@ -145,6 +148,176 @@ export function provenanceDescription(input: {
   }
   return lines.join("\n").slice(0, 1000);
 }
+
+// --- drive_export_file: pure helpers ---
+
+export const SHEET_MIME = "application/vnd.google-apps.spreadsheet";
+export const DOC_MIME = "application/vnd.google-apps.document";
+
+// The text of an export lands in model context, like base64 does for
+// gmail_get_attachment; 200 KB is the most a single tool result should carry.
+export const MAX_EXPORT_TEXT_BYTES = 200 * 1024;
+
+export type ExportKind = "sheet" | "doc";
+
+// Only the two Google-native document types are ever exported. Anything else
+// — a PDF, an image, an uploaded .xlsx — has bytes of its own, and this tool
+// never downloads bytes.
+export function exportKindForMime(mimeType: string): ExportKind | undefined {
+  if (mimeType === SHEET_MIME) {
+    return "sheet";
+  }
+  if (mimeType === DOC_MIME) {
+    return "doc";
+  }
+  return undefined;
+}
+
+export type SheetTab = {
+  title: string;
+  index: number;
+  sheetId: number;
+  rowCount?: number;
+  columnCount?: number;
+};
+
+// Google always sends title and index when the fields string asks for them;
+// a missing one means the fields string is wrong, so fail loudly as
+// fileProjection does.
+export function sheetTabsFromProperties(sheets: sheets_v4.Schema$Sheet[] | undefined): SheetTab[] {
+  const tabs = (sheets ?? []).map((sheet) => {
+    const properties = sheet.properties ?? {};
+    if (typeof properties.title !== "string" || typeof properties.index !== "number") {
+      throw new Error("Sheet tab is missing a title or index. The fields string requested from Sheets is likely wrong.");
+    }
+    const tab: SheetTab = { title: properties.title, index: properties.index, sheetId: properties.sheetId ?? 0 };
+    const rowCount = properties.gridProperties?.rowCount;
+    const columnCount = properties.gridProperties?.columnCount;
+    if (typeof rowCount === "number") {
+      tab.rowCount = rowCount;
+    }
+    if (typeof columnCount === "number") {
+      tab.columnCount = columnCount;
+    }
+    return tab;
+  });
+  return tabs.sort((a, b) => a.index - b.index);
+}
+
+export function pickSheet(tabs: SheetTab[], fileName: string, title?: string): SheetTab {
+  if (tabs.length === 0) {
+    throw new Error(`Spreadsheet ${fileName} reports no tabs. Nothing was changed.`);
+  }
+  if (title === undefined) {
+    return tabs[0];
+  }
+  const match = tabs.find((tab) => tab.title === title);
+  if (!match) {
+    const titles = tabs.map((tab) => `"${tab.title}"`).join(", ");
+    throw new Error(`Sheet "${title}" not found in ${fileName}. Tabs: ${titles}. Nothing was changed.`);
+  }
+  return match;
+}
+
+// A1 notation for "the whole tab": the title in single quotes, with any
+// single quote inside it doubled.
+export function a1SheetRange(title: string): string {
+  return `'${title.replace(/'/g, "''")}'`;
+}
+
+function csvField(cell: unknown): string {
+  const text = cell === null || cell === undefined ? "" : String(cell);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+// The Sheets API drops trailing empty cells from every row, so rows are
+// padded to the widest one: a ragged CSV misleads a reader counting columns.
+export function rowsToCsv(values: unknown[][] | null | undefined): string {
+  const rows = values ?? [];
+  const width = rows.reduce((max, row) => Math.max(max, row.length), 0);
+  return rows
+    .map((row) => {
+      const fields = row.map(csvField);
+      while (fields.length < width) {
+        fields.push("");
+      }
+      return fields.join(",");
+    })
+    .join("\n");
+}
+
+// Byte-based cap that never splits a UTF-8 character: a naive
+// Buffer.subarray(0, maxBytes).toString() would emit U+FFFD for a code point
+// cut in half, and that broken character would then be written to the spill
+// file's twin in the result. Prefers the last newline inside the cap so the
+// truncated text ends on a whole line.
+export function capExportText(
+  text: string,
+  maxBytes: number,
+): { text: string; truncated: boolean; totalBytes: number } {
+  const totalBytes = Buffer.byteLength(text, "utf8");
+  if (totalBytes <= maxBytes) {
+    return { text, truncated: false, totalBytes };
+  }
+
+  let bytes = 0;
+  let lastNewlineEnd = -1;
+  let charEnd = 0;
+  for (const ch of text) {
+    const length = Buffer.byteLength(ch, "utf8");
+    if (bytes + length > maxBytes) {
+      break;
+    }
+    bytes += length;
+    charEnd += ch.length;
+    if (ch === "\n") {
+      lastNewlineEnd = charEnd;
+    }
+  }
+
+  const end = lastNewlineEnd > 0 ? lastNewlineEnd - 1 : charEnd;
+  return { text: text.slice(0, end), truncated: true, totalBytes };
+}
+
+export function exportFilename(fileName: string, kind: ExportKind, sheetTitle?: string): string {
+  const candidate = kind === "doc" ? `${fileName}.txt` : `${fileName} - ${sheetTitle ?? ""}.csv`;
+  return sanitizeAttachmentFilename(candidate, "export");
+}
+
+// Google's answer when an API is not enabled on the Cloud project behind the
+// OAuth client. Recognised in the shapes seen from googleapis: the legacy
+// errors[].reason, the message text, and the newer details[].reason.
+export function isServiceDisabledError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as {
+    response?: {
+      status?: unknown;
+      data?: { error?: { message?: unknown; errors?: unknown; details?: unknown } };
+    };
+  };
+  if (candidate.response?.status !== 403) {
+    return false;
+  }
+  const detail = candidate.response.data?.error;
+  const message = typeof detail?.message === "string" ? detail.message : "";
+  if (message.includes("SERVICE_DISABLED") || message.includes("has not been used in project")) {
+    return true;
+  }
+  const reasonIs = (items: unknown, reason: string): boolean =>
+    Array.isArray(items) && items.some((item) => (item as { reason?: unknown })?.reason === reason);
+  return reasonIs(detail?.errors, "accessNotConfigured") || reasonIs(detail?.details, "SERVICE_DISABLED");
+}
+
+export function describeSheetsApiDisabled(): string {
+  return (
+    "The Google Sheets API is not enabled on the OAuth app's Cloud project. " +
+    "Enable it under APIs & Services > Library, then retry (see docs/google-cloud-setup.md, step 1). " +
+    "Nothing was changed."
+  );
+}
+
 
 // Returns the re-auth message when the token demonstrably lacks the Drive
 // scope, and undefined when it holds it or records no scope at all — an
@@ -438,6 +611,142 @@ async function moveFile(
   };
 }
 
+// --- drive_export_file: readers and orchestration ---
+
+const SHEET_TABS_FIELDS = "sheets.properties(title,index,sheetId,gridProperties(rowCount,columnCount))";
+
+// Both Sheets calls sit in one try so a "Sheets API not enabled" 403 from
+// either is rewritten into the setup message; everything else surfaces as
+// Google sent it.
+export async function readSheetAsCsv(
+  sheets: sheets_v4.Sheets,
+  spreadsheetId: string,
+  fileName: string,
+  title?: string,
+): Promise<{ tab: SheetTab; tabs: SheetTab[]; text: string }> {
+  try {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId, fields: SHEET_TABS_FIELDS });
+    const tabs = sheetTabsFromProperties(meta.data.sheets);
+    const tab = pickSheet(tabs, fileName, title);
+    // FORMATTED_VALUE and FORMATTED_STRING give the text a person sees in the
+    // sheet — dates as dates, amounts as formatted — which is what a registry
+    // written by hand from the sheet was copied from.
+    const values = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: a1SheetRange(tab.title),
+      valueRenderOption: "FORMATTED_VALUE",
+      dateTimeRenderOption: "FORMATTED_STRING",
+      majorDimension: "ROWS",
+    });
+    return { tab, tabs, text: rowsToCsv(values.data.values) };
+  } catch (error) {
+    if (isServiceDisabledError(error)) {
+      throw new Error(describeSheetsApiDisabled());
+    }
+    throw error;
+  }
+}
+
+// files.export takes no supportsAllDrives parameter; the files.get before it
+// is what proves the id resolves through a shared drive. Google caps this
+// export at 10 MB and answers a larger Doc with its own error.
+export async function readDocAsText(drive: drive_v3.Drive, fileId: string): Promise<string> {
+  const response = await drive.files.export({ fileId, mimeType: "text/plain" }, { responseType: "text" });
+  return String(response.data);
+}
+
+// Best effort, as decided on 2026-09-09: a truncated result must still reach
+// the caller when the download directory cannot be written, so a failure
+// here is reported in the notice, never thrown.
+export function spillExport(
+  account: string,
+  filename: string,
+  text: string,
+  totalBytes: number,
+): { savedTo?: string; notice: string } {
+  const over = `The export is ${totalBytes} bytes, over the ${MAX_EXPORT_TEXT_BYTES}-byte cap in the tool result`;
+  let directory: string | undefined;
+  try {
+    directory = downloadDir(account);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const savedTo = writeAttachmentFileExclusive(directory, filename, Buffer.from(text, "utf8"));
+    return { savedTo, notice: `${over}. The full text was written to ${savedTo}; read it from there.` };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      notice: `${over}, and writing the full text to ${directory ?? "the download directory"} failed: ${message}. Only the truncated text above is available.`,
+    };
+  }
+}
+
+export type ExportResult = {
+  file: FileProjection;
+  kind: ExportKind;
+  format: "csv" | "text";
+  sheet?: SheetTab;
+  sheets?: string[];
+  text: string;
+  sizeBytes: number;
+  truncated: boolean;
+  savedTo?: string;
+  notice?: string;
+};
+
+type ExportDeps = {
+  drive: drive_v3.Drive;
+  // A thunk so the Sheets client is only built on the Sheet path.
+  sheets: () => Promise<sheets_v4.Sheets>;
+  account: string;
+};
+
+export async function exportFile(deps: ExportDeps, input: { fileId: string; sheet?: string }): Promise<ExportResult> {
+  const outcome = "Nothing was changed.";
+  const file = await getFile(deps.drive, input.fileId, outcome);
+
+  const kind = exportKindForMime(file.mimeType);
+  if (kind === undefined) {
+    throw new Error(
+      `File ${file.id} is ${file.mimeType}, not a Google Sheet or Google Doc. drive_export_file reads only Google-native documents and never downloads a binary file. ${outcome}`,
+    );
+  }
+  if (kind === "doc" && input.sheet !== undefined) {
+    throw new Error(`sheet applies only to a Google Sheet; ${file.id} is a Google Doc. ${outcome}`);
+  }
+
+  let fullText: string;
+  let sheetInfo: { tab: SheetTab; tabs: SheetTab[] } | undefined;
+  if (kind === "sheet") {
+    const read = await readSheetAsCsv(await deps.sheets(), file.id, file.name, input.sheet);
+    fullText = read.text;
+    sheetInfo = { tab: read.tab, tabs: read.tabs };
+  } else {
+    fullText = await readDocAsText(deps.drive, file.id);
+  }
+
+  const capped = capExportText(fullText, MAX_EXPORT_TEXT_BYTES);
+  const result: ExportResult = {
+    file,
+    kind,
+    format: kind === "sheet" ? "csv" : "text",
+    text: capped.text,
+    sizeBytes: capped.totalBytes,
+    truncated: capped.truncated,
+  };
+  if (sheetInfo) {
+    result.sheet = sheetInfo.tab;
+    result.sheets = sheetInfo.tabs.map((tab) => tab.title);
+  }
+  if (capped.truncated) {
+    const filename = exportFilename(file.name, kind, sheetInfo?.tab.title);
+    const spill = spillExport(deps.account, filename, fullText, capped.totalBytes);
+    if (spill.savedTo !== undefined) {
+      result.savedTo = spill.savedTo;
+    }
+    result.notice = spill.notice;
+  }
+  return result;
+}
+
 export function registerDriveTools(server: McpServer): void {
   server.tool(
     "drive_list_files",
@@ -531,6 +840,27 @@ export function registerDriveTools(server: McpServer): void {
           }
           const drive = await driveForAccount(account);
           return await moveFile(drive, { fileId, folderId, name });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_export_file",
+    "Read the content of a Google-native document on Drive: a Google Sheet as CSV (one tab, default the first; pass sheet to pick another by title) or a Google Doc as plain text. Read-only and never a binary file: a PDF, image, or uploaded .xlsx is refused. The text in the result is capped at 200 KB; a larger export is truncated on a line boundary, and the full text is written into the account's download directory (OCTOMAIL_DOWNLOAD_DIR/<account>) with its path returned as savedTo.",
+    {
+      ...accountShape,
+      fileId: z.string().min(1).describe("Drive file id of a Google Sheet or Google Doc."),
+      sheet: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("For a Google Sheet: the tab title to read (exact match). Defaults to the first tab."),
+    },
+    async ({ account, fileId, sheet }) =>
+      safeTool(async () => {
+        return await driveScopeAware(account, "Nothing was changed.", async () => {
+          const drive = await driveForAccount(account);
+          return await exportFile({ drive, sheets: () => sheetsForAccount(account), account }, { fileId, sheet });
         });
       }, account),
   );
