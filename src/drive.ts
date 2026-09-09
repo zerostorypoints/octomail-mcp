@@ -149,6 +149,27 @@ export function provenanceDescription(input: {
   return lines.join("\n").slice(0, 1000);
 }
 
+// Provenance for drive_copy_file, phrased like provenanceDescription. An
+// existing description is kept in front so a copy of a copy carries its whole
+// lineage; the 1000-character cap trims that existing text from its end and
+// never the provenance line, which is the part a reader needs intact.
+export const MAX_DESCRIPTION_CHARS = 1000;
+
+export function copyProvenanceDescription(input: {
+  sourceName: string;
+  sourceId: string;
+  copiedAt: string;
+  existing?: string | null;
+}): string {
+  const line = `Copied by Octomail from ${input.sourceName} (${input.sourceId}) on ${input.copiedAt}.`;
+  const existing = (input.existing ?? "").trim();
+  if (existing.length === 0) {
+    return line.slice(0, MAX_DESCRIPTION_CHARS);
+  }
+  const room = MAX_DESCRIPTION_CHARS - line.length - 1;
+  return `${existing.slice(0, Math.max(room, 0))}\n${line}`;
+}
+
 // --- drive_export_file: pure helpers ---
 
 export const SHEET_MIME = "application/vnd.google-apps.spreadsheet";
@@ -365,17 +386,20 @@ function isNotFoundError(error: unknown): boolean {
 // phrase and noun ("Folder" / "File") come from the caller so the refusal
 // reads the way that tool promises — "Nothing was changed." for
 // create/move, "Nothing was uploaded." for a future upload tool.
+const CHECK_FIELDS = "id,name,mimeType,parents,trashed";
+
 async function getDriveFileForCheck(
   drive: drive_v3.Drive,
   fileId: string,
   outcome: string,
   noun: "Folder" | "File",
+  fields: string = CHECK_FIELDS,
 ): Promise<drive_v3.Schema$File> {
   let file: drive_v3.Schema$File;
   try {
     const response = await drive.files.get({
       fileId,
-      fields: "id,name,mimeType,parents,trashed",
+      fields,
       supportsAllDrives: true,
     });
     file = response.data;
@@ -411,6 +435,26 @@ export async function getFolder(drive: drive_v3.Drive, folderId: string, outcome
 export async function getFile(drive: drive_v3.Drive, fileId: string, outcome: string): Promise<FileProjection> {
   const file = await getDriveFileForCheck(drive, fileId, outcome, "File");
   return fileProjection(file);
+}
+
+// The source of a copy: any file but a folder, with its description fetched
+// too so the copy can carry it forward. A folder is refused here, before the
+// target is looked at, because files.copy on a folder is not something Drive
+// does either — it would fail later with a less useful message.
+export async function getFileForCopy(
+  drive: drive_v3.Drive,
+  fileId: string,
+  outcome: string,
+): Promise<{ file: FileProjection; description?: string }> {
+  const file = await getDriveFileForCheck(drive, fileId, outcome, "File", `${CHECK_FIELDS},description`);
+  if (file.mimeType === FOLDER_MIME) {
+    throw new Error(`File ${fileId} is a folder. drive_copy_file copies files only, not folders. ${outcome}`);
+  }
+  const result: { file: FileProjection; description?: string } = { file: fileProjection(file) };
+  if (typeof file.description === "string") {
+    result.description = file.description;
+  }
+  return result;
 }
 
 const FILE_FIELDS = "id,name,mimeType,size,modifiedTime,parents,webViewLink,md5Checksum";
@@ -609,6 +653,47 @@ async function moveFile(
     previousParents,
     previousName: file.name,
   };
+}
+
+// Same check-before-write shape as saveAttachmentToDrive and moveFile: source
+// validated, then target, then the collision check, then the one write. The
+// source is only ever read; the collision check does not exclude the source
+// id, because a source already sitting in the target folder under the target
+// name would make the copy a duplicate, which is what the check refuses.
+async function copyFile(
+  drive: drive_v3.Drive,
+  input: { fileId: string; targetFolderId: string; newName?: string; copiedAt: string },
+): Promise<{ file: FileProjection; sourceFileId: string }> {
+  const outcome = "Nothing was copied.";
+  const source = await getFileForCopy(drive, input.fileId, outcome);
+
+  await getFolder(drive, input.targetFolderId, outcome);
+
+  const targetName = input.newName ?? source.file.name;
+  const existing = await findByExactName(drive, targetName, input.targetFolderId);
+  if (existing) {
+    throw new Error(
+      `A file named "${targetName}" already exists in that folder (id ${existing.id}, ${existing.webViewLink}). Pass a different newName. ${outcome}`,
+    );
+  }
+
+  const description = copyProvenanceDescription({
+    sourceName: source.file.name,
+    sourceId: source.file.id,
+    copiedAt: input.copiedAt,
+    existing: source.description,
+  });
+
+  // No mimeType in the body: Drive keeps the source's type, so a Google Doc
+  // copies as a Google Doc and a PDF as a PDF.
+  const response = await drive.files.copy({
+    fileId: input.fileId,
+    requestBody: { name: targetName, parents: [input.targetFolderId], description },
+    fields: FILE_FIELDS,
+    supportsAllDrives: true,
+  });
+
+  return { file: fileProjection(response.data), sourceFileId: input.fileId };
 }
 
 // --- drive_export_file: readers and orchestration ---
@@ -840,6 +925,27 @@ export function registerDriveTools(server: McpServer): void {
           }
           const drive = await driveForAccount(account);
           return await moveFile(drive, { fileId, folderId, name });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_copy_file",
+    "Copy a Google Drive file into a folder on the same account, optionally under a new name. Drive performs the copy on its side, so no bytes pass through this server; a Google Doc or Sheet copies as the same Google type, a PDF or image byte for byte, and a copy from My Drive into a shared drive works. The copy's description records the source file and time, appended to any description the source already had. Refuses when a file with the resulting name already exists in the target folder rather than overwriting it, and refuses a folder as the source. Only copies: it cannot delete, move, rename, share, or overwrite anything, and it never modifies the source.",
+    {
+      ...accountShape,
+      fileId: z.string().min(1).describe("Drive file id to copy. Must be a file, not a folder."),
+      targetFolderId: z.string().min(1).describe("Destination Drive folder id the copy is placed in."),
+      newName: z.string().min(1).optional().describe("Name of the copy. Defaults to the source file's name."),
+    },
+    async ({ account, fileId, targetFolderId, newName }) =>
+      safeTool(async () => {
+        return await driveScopeAware(account, "Nothing was copied.", async () => {
+          if (newName !== undefined) {
+            assertDriveName(newName, "Nothing was copied.");
+          }
+          const drive = await driveForAccount(account);
+          return await copyFile(drive, { fileId, targetFolderId, newName, copiedAt: new Date().toISOString() });
         });
       }, account),
   );
