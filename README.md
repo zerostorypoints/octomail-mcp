@@ -47,15 +47,17 @@ destructive actions available are deleting a label or a filter, which also
 require an explicit `confirm: true` — without it they return an impact report
 and change nothing. Deleting a label does not delete the messages that
 carried it, only their categorisation. The Drive tools can create folders,
-upload a Gmail attachment, and move or rename a file; nothing on Drive is
-ever deleted, trashed, or shared, and the only bytes a Drive tool ever
-uploads are a Gmail attachment already on the same account. One Drive tool
+upload a Gmail attachment, move or rename a file, and copy a file into a
+folder on the same account; nothing on Drive is ever deleted, trashed, or
+shared, and the only bytes a Drive tool ever uploads are a Gmail attachment
+already on the same account (a copy is made by Drive itself, with no bytes
+passing through this server). One Drive tool
 reads content: `drive_export_file` returns the text of a Google Sheet (one
 tab, as CSV) or a Google Doc (as plain text), capped at 200 KB in the
 result, and writes a larger export into the account's download directory
 under a fresh name instead of overwriting anything. It never downloads a
 binary file — a PDF, an image, or an uploaded spreadsheet is refused. A
-file already named that in the target folder makes the upload or move
+file already named that in the target folder makes the upload, move, or copy
 refuse rather than overwrite it. OAuth tokens are stored locally at
 file mode `0600`. See [SECURITY.md](SECURITY.md) for the full policy and how
 to report a vulnerability.
@@ -141,6 +143,7 @@ spam, and deletion actions unless the call carries an explicit
 - `drive_create_folder(account, name, parentId?)` — creates a folder, or if one of that name already exists directly under the given parent, returns it instead with `created: false` and creates nothing.
 - `drive_save_attachment(account, messageId, attachmentId, folderId, name?)` — saves a Gmail attachment straight into a Drive folder; the bytes go directly from Gmail to Drive, never through local disk. `folderId` is required, and the new file's description records the source account, message id, subject, sender, and date. Refuses, naming the existing file's id, when a file with the target name already exists in that folder, rather than overwriting it.
 - `drive_move_file(account, fileId, folderId?, name?)` — moves a Drive file to a different folder, renames it, or both in one call, removing it from every previous parent. Refuses when a file with the resulting name already exists in the target folder. Cannot copy the file or move it to a different account.
+- `drive_copy_file(account, fileId, targetFolderId, newName?)` — copies a Drive file into a folder on the same account, under `newName` or the source's own name. A Google Doc or Sheet copies as the same Google type, a binary file byte for byte, and a copy from My Drive into a shared drive works; Drive performs the copy, so no bytes pass through this server. The copy's description records the source file id, name, and time, appended to any description the source already carried. Refuses, naming the existing file's id, when a file with the resulting name already exists in the target folder, and refuses a folder as the source. Never modifies the source and cannot delete, move, or overwrite anything.
 - `drive_export_file(account, fileId, sheet?)` — reads a Google Sheet as CSV (one tab; `sheet` picks it by title, default the first) or a Google Doc as plain text. Google-native documents only: any other mime type is refused before any content request. The result's `text` is capped at 200 KB, cut on a line boundary; when cut, `truncated: true` and the full text is written into `OCTOMAIL_DOWNLOAD_DIR/<account>` with the path in `savedTo`, never overwriting an existing file. Sheets are read through the Google Sheets API under the existing `drive` scope, so that API must be enabled on the Cloud project.
 
 ## Documentation
