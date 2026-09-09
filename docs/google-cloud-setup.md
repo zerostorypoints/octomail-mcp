@@ -4,7 +4,7 @@ This server talks to Gmail through your own Google Cloud project. You create the
 project once, then every account you add authorizes against it. Nothing here is
 Gmail-account-specific until the "Test users" step below.
 
-## 1. Create a project and enable the Gmail API, Calendar API, and Drive API
+## 1. Create a project and enable the Gmail, Calendar, Drive, and Sheets APIs
 
 Open the [Google Cloud Console](https://console.cloud.google.com/) and create a
 new project (or pick an existing one you're comfortable using). Then go to
@@ -15,7 +15,9 @@ tools fail with Google's `SERVICE_DISABLED` / `accessNotConfigured` 403.
 `calendar.readonly` must also be listed among the scopes on the OAuth consent
 screen's scope configuration (step 2 below). The Google Drive API is a third
 library entry in the same project — search for "Google Drive API" and enable
-it too, or the Drive tools fail the same way.
+it too, or the Drive tools fail the same way. The Google Sheets API is a
+fourth — `drive_export_file` reads spreadsheet tabs through it, under the
+Drive scope, and refuses with a message naming this step until it is enabled.
 
 ## 2. Configure the OAuth consent screen
 
@@ -92,7 +94,7 @@ You have three options, in order of convenience:
 | `gmail.settings.basic` | List, create, and delete filters |
 | `calendar.readonly` | List calendars and events |
 | `calendar.events` | Requested for a planned future feature (busy-block sync between calendars); no registered tool uses it yet |
-| `drive` | List folders and files, create folders, upload a Gmail attachment, move or rename; full scope because `drive.file` cannot see folders the app did not create |
+| `drive` | List folders and files, create folders, upload a Gmail attachment, move or rename, read a Google Sheet or Doc as text (the Sheets API accepts this scope); full scope because `drive.file` cannot see folders the app did not create |
 
 Adding a scope to this list means every already-authorized account is
 missing it until it re-runs `npm run auth -- --account <alias>` and approves

@@ -42,6 +42,16 @@ affected accounts with a `!` line reading "no filter scope". An account
 authorized before Drive access was requested gets the same treatment — a
 `!` line reading "no drive scope" — and only the Drive tools are affected.
 
+## `The Google Sheets API is not enabled on the OAuth app's Cloud project`
+
+`drive_export_file` reads a Google Sheet through the Sheets API, under the
+Drive scope the token already carries — no re-auth is involved. The refusal
+means the Google Sheets API is switched off on the Cloud project behind the
+OAuth client. Enable it under **APIs & Services > Library** (step 1 of
+[google-cloud-setup.md](google-cloud-setup.md)) and retry; nothing else
+changes. Google Docs are unaffected, since they are read through the Drive
+API.
+
 If you are a Google Workspace admin and the consent screen refuses the scope for
 your domain, allow the OAuth client under **Admin console > Security > Access and
 data control > API controls > Manage third-party app access**.

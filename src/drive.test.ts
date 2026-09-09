@@ -8,18 +8,29 @@ import type { drive_v3 } from "googleapis";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { DRIVE_SCOPE } from "./gmail.js";
 import {
+  DOC_MIME,
   FOLDER_MIME,
+  SHEET_MIME,
+  a1SheetRange,
   assertDriveName,
   assertListInput,
   assertMoveInput,
+  capExportText,
   childrenQuery,
+  describeSheetsApiDisabled,
   escapeDriveQueryValue,
   exactNameInFolderQuery,
+  exportFilename,
+  exportKindForMime,
   fileProjection,
+  isServiceDisabledError,
   missingDriveScope,
   nameContainsQuery,
+  pickSheet,
   provenanceDescription,
   registerDriveTools,
+  rowsToCsv,
+  sheetTabsFromProperties,
 } from "./drive.js";
 
 // --- fileProjection ---
@@ -249,6 +260,196 @@ test("missingDriveScope returns undefined when scope is absent", () => {
   assert.equal(message, undefined);
 });
 
+// --- drive_export_file pure helpers ---
+
+test("exportKindForMime maps a Google Sheet to sheet", () => {
+  assert.equal(exportKindForMime(SHEET_MIME), "sheet");
+});
+
+test("exportKindForMime maps a Google Doc to doc", () => {
+  assert.equal(exportKindForMime(DOC_MIME), "doc");
+});
+
+test("exportKindForMime returns undefined for a folder, a PDF and an uploaded xlsx", () => {
+  assert.equal(exportKindForMime(FOLDER_MIME), undefined);
+  assert.equal(exportKindForMime("application/pdf"), undefined);
+  assert.equal(
+    exportKindForMime("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    undefined,
+  );
+});
+
+const TAB_SECOND = {
+  properties: { title: "stare wpisy", index: 1, sheetId: 22, gridProperties: { rowCount: 3, columnCount: 2 } },
+};
+const TAB_FIRST = {
+  properties: { title: "Arkusz1", index: 0, sheetId: 0, gridProperties: { rowCount: 2, columnCount: 3 } },
+};
+
+test("sheetTabsFromProperties sorts tabs by index and carries grid sizes", () => {
+  const tabs = sheetTabsFromProperties([TAB_SECOND, TAB_FIRST]);
+  assert.deepEqual(tabs, [
+    { title: "Arkusz1", index: 0, sheetId: 0, rowCount: 2, columnCount: 3 },
+    { title: "stare wpisy", index: 1, sheetId: 22, rowCount: 3, columnCount: 2 },
+  ]);
+});
+
+test("sheetTabsFromProperties throws when a tab has no title", () => {
+  assert.throws(() => sheetTabsFromProperties([{ properties: { index: 0, sheetId: 0 } }]));
+});
+
+const TABS = sheetTabsFromProperties([TAB_SECOND, TAB_FIRST]);
+
+test("pickSheet defaults to the index-0 tab even when Google listed it second", () => {
+  assert.equal(pickSheet(TABS, "Budżet roczny").title, "Arkusz1");
+});
+
+test("pickSheet finds a tab by exact title", () => {
+  assert.equal(pickSheet(TABS, "Budżet roczny", "stare wpisy").sheetId, 22);
+});
+
+test("pickSheet treats a case mismatch as a miss", () => {
+  assert.throws(() => pickSheet(TABS, "Budżet roczny", "Stare Wpisy"), /not found/);
+});
+
+test("pickSheet's miss message lists every tab title", () => {
+  assert.throws(
+    () => pickSheet(TABS, "Budżet roczny", "Nieistniejący"),
+    /Sheet "Nieistniejący" not found in Budżet roczny\. Tabs: "Arkusz1", "stare wpisy"\. Nothing was changed\.$/,
+  );
+});
+
+test("pickSheet throws on a spreadsheet with no tabs", () => {
+  assert.throws(() => pickSheet([], "Budżet roczny"), /reports no tabs\. Nothing was changed\./);
+});
+
+test("a1SheetRange wraps a plain title in single quotes", () => {
+  assert.equal(a1SheetRange("Arkusz1"), "'Arkusz1'");
+});
+
+test("a1SheetRange keeps spaces and Polish letters inside the quotes", () => {
+  assert.equal(a1SheetRange("stare wpisy"), "'stare wpisy'");
+  assert.equal(a1SheetRange("Płace"), "'Płace'");
+});
+
+test("a1SheetRange doubles a single quote in the title", () => {
+  assert.equal(a1SheetRange("it's"), "'it''s'");
+});
+
+test("rowsToCsv renders plain cells with commas and newlines", () => {
+  assert.equal(rowsToCsv([["a", "b"], ["c", "d"]]), "a,b\nc,d");
+});
+
+test("rowsToCsv quotes a field containing a comma", () => {
+  assert.equal(rowsToCsv([["Kowalska, Anna", "x"]]), '"Kowalska, Anna",x');
+});
+
+test("rowsToCsv doubles an inner double quote", () => {
+  assert.equal(rowsToCsv([['say "hi"']]), '"say ""hi"""');
+});
+
+test("rowsToCsv quotes fields containing LF or CR", () => {
+  assert.equal(rowsToCsv([["a\nb", "c\rd"]]), '"a\nb","c\rd"');
+});
+
+test("rowsToCsv renders null, undefined and numbers", () => {
+  assert.equal(rowsToCsv([[null, undefined, 12.5]]), ",,12.5");
+});
+
+test("rowsToCsv pads ragged rows to the widest row", () => {
+  assert.equal(rowsToCsv([["a", "b", "c"], ["d"]]), "a,b,c\nd,,");
+});
+
+test("rowsToCsv renders empty or absent input as an empty string", () => {
+  assert.equal(rowsToCsv([]), "");
+  assert.equal(rowsToCsv(null), "");
+  assert.equal(rowsToCsv(undefined), "");
+});
+
+test("rowsToCsv does not end with a newline", () => {
+  assert.ok(!rowsToCsv([["a"], ["b"]]).endsWith("\n"));
+});
+
+test("capExportText returns text under the cap unchanged", () => {
+  assert.deepEqual(capExportText("abc", 10), { text: "abc", truncated: false, totalBytes: 3 });
+});
+
+test("capExportText cuts on the last newline inside the cap", () => {
+  const line = "x".repeat(100);
+  const text = [line, line, line].join("\n");
+  const result = capExportText(text, 250);
+  assert.equal(result.text, `${line}\n${line}`);
+  assert.equal(result.truncated, true);
+  assert.equal(result.totalBytes, 302);
+});
+
+test("capExportText without a newline inside the cap cuts on a character boundary", () => {
+  const text = "ł".repeat(100);
+  const result = capExportText(text, 101);
+  assert.equal(result.text, "ł".repeat(50));
+  assert.ok(!result.text.includes("�"));
+  assert.equal(result.truncated, true);
+  assert.equal(result.totalBytes, 200);
+});
+
+test("exportFilename gives a doc a .txt name", () => {
+  assert.equal(exportFilename("Budżet roczny", "doc"), "Budżet roczny.txt");
+});
+
+test("exportFilename gives a sheet tab a .csv name carrying the tab title", () => {
+  assert.equal(exportFilename("Budżet roczny", "sheet", "stare wpisy"), "Budżet roczny - stare wpisy.csv");
+});
+
+test("exportFilename sanitises a slash in the tab title", () => {
+  assert.ok(!exportFilename("Budżet roczny", "sheet", "a/b").includes("/"));
+});
+
+test("isServiceDisabledError recognises the accessNotConfigured reason", () => {
+  assert.equal(
+    isServiceDisabledError({
+      response: { status: 403, data: { error: { message: "disabled", errors: [{ reason: "accessNotConfigured" }] } } },
+    }),
+    true,
+  );
+});
+
+test("isServiceDisabledError recognises the has-not-been-used message", () => {
+  assert.equal(
+    isServiceDisabledError({
+      response: {
+        status: 403,
+        data: { error: { message: "Google Sheets API has not been used in project 123 before or it is disabled." } },
+      },
+    }),
+    true,
+  );
+});
+
+test("isServiceDisabledError recognises the SERVICE_DISABLED detail reason", () => {
+  assert.equal(
+    isServiceDisabledError({
+      response: { status: 403, data: { error: { message: "x", details: [{ reason: "SERVICE_DISABLED" }] } } },
+    }),
+    true,
+  );
+});
+
+test("isServiceDisabledError is false for a 404 and for a scope 403", () => {
+  assert.equal(isServiceDisabledError({ response: { status: 404, data: { error: { message: "not found" } } } }), false);
+  assert.equal(
+    isServiceDisabledError({
+      response: { status: 403, data: { error: { message: "Request had insufficient authentication scopes." } } },
+    }),
+    false,
+  );
+});
+
+test("describeSheetsApiDisabled names the setup step and ends with the outcome phrase", () => {
+  assert.match(describeSheetsApiDisabled(), /Google Sheets API is not enabled/);
+  assert.match(describeSheetsApiDisabled(), /docs\/google-cloud-setup\.md, step 1/);
+  assert.match(describeSheetsApiDisabled(), /Nothing was changed\.$/);
+});
+
 // --- end-to-end: registerDriveTools against a fake Drive network ---
 //
 // Same fake-fetch harness as src/gate.test.ts (test files in this repo do not
@@ -288,7 +489,28 @@ async function callTool(
 }
 
 type FakeCall = { method: string; pathname: string; url: URL; body?: string };
-type FakeRoute = { method: string; test: (pathname: string) => boolean; respond: (url: URL) => unknown };
+// `host` restricts a route to one API host (Sheets traffic goes to
+// sheets.googleapis.com); a route without it matches any host, as before.
+type FakeRoute = {
+  method: string;
+  host?: string;
+  test: (pathname: string) => boolean;
+  respond: (url: URL) => unknown;
+};
+
+// A route's respond() normally returns an object sent as JSON with status
+// 200. Returning fakeReply(status, body) instead sends that status; a string
+// body goes out as text/plain, verbatim, which is what a Doc export returns.
+class FakeReply {
+  constructor(
+    readonly status: number,
+    readonly body: unknown,
+  ) {}
+}
+
+function fakeReply(status: number, body: unknown): FakeReply {
+  return new FakeReply(status, body);
+}
 
 // googleapis sends a plain JSON requestBody as a string, but routes a
 // files.create call with `media` (drive_save_attachment's upload) as a
@@ -323,7 +545,12 @@ function installFakeNetwork(routes: FakeRoute[]): { calls: FakeCall[] } {
           : { method, pathname: parsed.pathname, url: parsed, body },
       );
 
-      const route = routes.find((candidate) => candidate.method === method && candidate.test(parsed.pathname));
+      const route = routes.find(
+        (candidate) =>
+          candidate.method === method &&
+          (candidate.host === undefined || candidate.host === parsed.hostname) &&
+          candidate.test(parsed.pathname),
+      );
       if (!route) {
         return new Response(
           JSON.stringify({ error: { code: 404, message: `no fake route for ${method} ${parsed.pathname}` } }),
@@ -331,7 +558,17 @@ function installFakeNetwork(routes: FakeRoute[]): { calls: FakeCall[] } {
         );
       }
 
-      return new Response(JSON.stringify(route.respond(parsed)), {
+      const reply = route.respond(parsed);
+      if (reply instanceof FakeReply) {
+        if (typeof reply.body === "string") {
+          return new Response(reply.body, { status: reply.status, headers: { "content-type": "text/plain" } });
+        }
+        return new Response(JSON.stringify(reply.body), {
+          status: reply.status,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify(reply), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -347,6 +584,7 @@ function setupAccountFixture(withDriveScope = true): void {
   fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-drive-test-"));
   process.env.OCTOMAIL_ACCOUNTS_FILE = path.join(fixtureDir, "accounts.json");
   process.env.OCTOMAIL_TOKEN_DIR = path.join(fixtureDir, "tokens");
+  process.env.OCTOMAIL_DOWNLOAD_DIR = path.join(fixtureDir, "downloads");
   process.env.GOOGLE_CLIENT_ID = "test-client-id";
   process.env.GOOGLE_CLIENT_SECRET = "test-client-secret";
 
@@ -374,6 +612,7 @@ function setupAccountFixture(withDriveScope = true): void {
 function teardownAccountFixture(): void {
   delete process.env.OCTOMAIL_ACCOUNTS_FILE;
   delete process.env.OCTOMAIL_TOKEN_DIR;
+  delete process.env.OCTOMAIL_DOWNLOAD_DIR;
   delete process.env.GOOGLE_CLIENT_ID;
   delete process.env.GOOGLE_CLIENT_SECRET;
   google.options({});
@@ -1037,6 +1276,318 @@ test("drive_move_file refuses a trashed file without a PATCH", async () => {
       !calls.some((call) => call.method === "PATCH"),
       `expected no PATCH; calls were: ${JSON.stringify(calls)}`,
     );
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+// --- end-to-end: drive_export_file ---
+//
+// Same fake-fetch harness. Sheets traffic goes to sheets.googleapis.com, so
+// routes for it name the host; a Drive files.get and a Sheets
+// spreadsheets.get therefore never collide even though both are GETs.
+
+const SHEETS_HOST = "sheets.googleapis.com";
+const SHEET_FILE = { id: "sheet1", name: "Budżet roczny", mimeType: SHEET_MIME };
+const SHEET_TRASHED = { ...SHEET_FILE, trashed: true };
+const PDF_FILE = { id: "pdf1", name: "faktura.pdf", mimeType: "application/pdf" };
+const SHEET_META = {
+  sheets: [
+    { properties: { title: "stare wpisy", index: 1, sheetId: 22, gridProperties: { rowCount: 3, columnCount: 2 } } },
+    { properties: { title: "Arkusz1", index: 0, sheetId: 0, gridProperties: { rowCount: 2, columnCount: 3 } } },
+  ],
+};
+const SHEET_VALUES = { values: [["Nazwisko", "Imię", "Od"], ["Kowalska", "Anna"]] };
+
+function sheetRoutes(fileResponse: unknown = SHEET_FILE): FakeRoute[] {
+  return [
+    { method: "GET", test: (p) => p === "/drive/v3/files/sheet1", respond: () => fileResponse },
+    { method: "GET", host: SHEETS_HOST, test: (p) => p === "/v4/spreadsheets/sheet1", respond: () => SHEET_META },
+    {
+      method: "GET",
+      host: SHEETS_HOST,
+      test: (p) => decodeURIComponent(p).startsWith("/v4/spreadsheets/sheet1/values/"),
+      respond: () => SHEET_VALUES,
+    },
+  ];
+}
+
+function sheetsCalls(calls: FakeCall[]): FakeCall[] {
+  return calls.filter((call) => call.url.hostname === SHEETS_HOST);
+}
+
+test("drive_export_file with a token lacking the Drive scope refuses before any network call", async () => {
+  setupAccountFixture(false);
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(sheetRoutes());
+
+    const result = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "sheet1" });
+
+    assert.match(result.error as string, /authorized before Octomail requested Drive access/);
+    assert.equal(calls.length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_export_file refuses a PDF before any content request", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === "/drive/v3/files/pdf1", respond: () => PDF_FILE },
+    ]);
+
+    const result = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "pdf1" });
+
+    assert.match(result.error as string, /application\/pdf, not a Google Sheet or Google Doc/);
+    assert.match(result.error as string, /Nothing was changed\.$/);
+    assert.equal(sheetsCalls(calls).length, 0);
+    assert.ok(calls.every((call) => !call.pathname.endsWith("/export")));
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_export_file refuses a trashed Sheet without a Sheets call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(sheetRoutes(SHEET_TRASHED));
+
+    const result = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "sheet1" });
+
+    assert.match(result.error as string, /is in the trash/);
+    assert.equal(sheetsCalls(calls).length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_export_file reads the index-0 tab as padded CSV when no sheet is named", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(sheetRoutes());
+
+    const result = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "sheet1" });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.deepEqual(
+      calls.map((call) => decodeURIComponent(call.pathname)),
+      ["/drive/v3/files/sheet1", "/v4/spreadsheets/sheet1", "/v4/spreadsheets/sheet1/values/'Arkusz1'"],
+    );
+    const valuesCall = calls[2];
+    assert.equal(valuesCall.url.searchParams.get("valueRenderOption"), "FORMATTED_VALUE");
+    assert.equal((result.sheet as { title: string }).title, "Arkusz1");
+    assert.deepEqual(result.sheets, ["Arkusz1", "stare wpisy"]);
+    assert.equal(result.text, "Nazwisko,Imię,Od\nKowalska,Anna,");
+    assert.equal(result.kind, "sheet");
+    assert.equal(result.format, "csv");
+    assert.equal(result.truncated, false);
+    assert.equal("savedTo" in result, false);
+    assert.equal((result.file as { id: string }).id, "sheet1");
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_export_file reads the tab named by sheet", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(sheetRoutes());
+
+    const result = await callTool(handlers, "drive_export_file", {
+      account: ACCOUNT,
+      fileId: "sheet1",
+      sheet: "stare wpisy",
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(decodeURIComponent(calls[2].pathname), "/v4/spreadsheets/sheet1/values/'stare wpisy'");
+    assert.equal((result.sheet as { sheetId: number }).sheetId, 22);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_export_file refuses an unknown tab, listing the titles, without a values call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(sheetRoutes());
+
+    const result = await callTool(handlers, "drive_export_file", {
+      account: ACCOUNT,
+      fileId: "sheet1",
+      sheet: "Nieistniejący",
+    });
+
+    assert.match(
+      result.error as string,
+      /Sheet "Nieistniejący" not found in Budżet roczny\. Tabs: "Arkusz1", "stare wpisy"\./,
+    );
+    assert.ok(calls.every((call) => !call.pathname.includes("/values/")));
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_export_file rewrites a Sheets API not-enabled 403 into the setup message", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    installFakeNetwork([
+      { method: "GET", test: (p) => p === "/drive/v3/files/sheet1", respond: () => SHEET_FILE },
+      {
+        method: "GET",
+        host: SHEETS_HOST,
+        test: (p) => p === "/v4/spreadsheets/sheet1",
+        respond: () =>
+          fakeReply(403, {
+            error: {
+              code: 403,
+              message: "Google Sheets API has not been used in project 123 before or it is disabled.",
+              errors: [{ reason: "accessNotConfigured" }],
+            },
+          }),
+      },
+    ]);
+
+    const result = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "sheet1" });
+
+    assert.equal(result.error, describeSheetsApiDisabled());
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+// --- end-to-end: drive_export_file on a Google Doc, the cap and the spill file ---
+
+const DOC_FILE = { id: "doc1", name: "Umowa", mimeType: DOC_MIME };
+const DOC_TEXT = "Umowa o dzieło\nParagraf 1\n";
+const BIG_DOC_TEXT = Array.from({ length: 3000 }, (_, n) => `Linia ${n}: `.padEnd(99, "x")).join("\n");
+
+function docRoutes(text: string): FakeRoute[] {
+  return [
+    { method: "GET", test: (p) => p === "/drive/v3/files/doc1", respond: () => DOC_FILE },
+    { method: "GET", test: (p) => p === "/drive/v3/files/doc1/export", respond: () => fakeReply(200, text) },
+  ];
+}
+
+test("drive_export_file reads a Google Doc as plain text through files.export", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(docRoutes(DOC_TEXT));
+
+    const result = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "doc1" });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.deepEqual(
+      calls.map((call) => call.pathname),
+      ["/drive/v3/files/doc1", "/drive/v3/files/doc1/export"],
+    );
+    assert.equal(calls[1].url.searchParams.get("mimeType"), "text/plain");
+    assert.equal(result.text, DOC_TEXT);
+    assert.equal(result.kind, "doc");
+    assert.equal(result.format, "text");
+    assert.equal("sheets" in result, false);
+    assert.equal(result.sizeBytes, Buffer.byteLength(DOC_TEXT));
+    assert.equal(result.truncated, false);
+    assert.equal(sheetsCalls(calls).length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_export_file refuses sheet on a Google Doc without an export call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(docRoutes(DOC_TEXT));
+
+    const result = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "doc1", sheet: "x" });
+
+    assert.match(result.error as string, /sheet applies only to a Google Sheet/);
+    assert.ok(calls.every((call) => !call.pathname.endsWith("/export")));
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_export_file truncates a Doc over the cap on a line and writes the full text to the download dir", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    installFakeNetwork(docRoutes(BIG_DOC_TEXT));
+
+    const result = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "doc1" });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.truncated, true);
+    const text = result.text as string;
+    assert.ok(Buffer.byteLength(text) <= 204800);
+    assert.ok(BIG_DOC_TEXT.startsWith(text));
+    assert.equal(BIG_DOC_TEXT[text.length], "\n", "the cut must fall right before a newline");
+    assert.equal(result.sizeBytes, Buffer.byteLength(BIG_DOC_TEXT));
+
+    const savedTo = result.savedTo as string;
+    assert.ok(savedTo.startsWith(path.join(fixtureDir, "downloads", ACCOUNT)), `unexpected savedTo: ${savedTo}`);
+    assert.equal(fs.readFileSync(savedTo, "utf8"), BIG_DOC_TEXT);
+    assert.equal(fs.statSync(savedTo).mode & 0o777, 0o600);
+    assert.ok((result.notice as string).includes(savedTo));
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_export_file spills a second export under a fresh name rather than overwriting", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    installFakeNetwork(docRoutes(BIG_DOC_TEXT));
+
+    const first = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "doc1" });
+    const firstStat = fs.statSync(first.savedTo as string);
+    const second = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "doc1" });
+
+    assert.ok((second.savedTo as string).endsWith("Umowa (2).txt"), `unexpected savedTo: ${second.savedTo}`);
+    assert.notEqual(second.savedTo, first.savedTo);
+    assert.deepEqual(fs.statSync(first.savedTo as string).mtimeMs, firstStat.mtimeMs);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_export_file still returns the truncated text when the spill file cannot be written", async () => {
+  setupAccountFixture();
+  try {
+    // A regular file where the download root should be: mkdirSync fails.
+    fs.writeFileSync(process.env.OCTOMAIL_DOWNLOAD_DIR!, "not a directory");
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    installFakeNetwork(docRoutes(BIG_DOC_TEXT));
+
+    const result = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "doc1" });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.truncated, true);
+    assert.equal("savedTo" in result, false);
+    assert.match(result.notice as string, /failed/);
   } finally {
     teardownAccountFixture();
   }
