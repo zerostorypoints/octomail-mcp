@@ -766,6 +766,62 @@ async function trashFile(
   };
 }
 
+// Batch form of the same operation for a list the user has accepted: one call,
+// one row per item, no row aborts the others. Each row goes through the
+// identical trashFile path (name guard, confirm, confirmFolder, already
+// trashed), so the batch is not a looser gate, only a shorter transcript.
+// Rows are processed in order and sequentially, and a row that fails is
+// reported with Google's or this server's message and nothing else changes
+// for it.
+export const TRASH_BATCH_MAX = 100;
+
+export type TrashBatchRow =
+  | { fileId: string; expectedName: string; status: "trashed"; file: FileProjection; isFolder: boolean }
+  | { fileId: string; expectedName: string; status: "wouldTrash"; file: FileProjection; isFolder: boolean }
+  | { fileId: string; expectedName: string; status: "refused"; error: string };
+
+export function assertTrashBatchInput(items: { fileId: string; expectedName: string }[], outcome: string): void {
+  if (items.length === 0) {
+    throw new Error(`items is empty. ${outcome}`);
+  }
+  if (items.length > TRASH_BATCH_MAX) {
+    throw new Error(`items has ${items.length} rows; the cap is ${TRASH_BATCH_MAX} per call. Split the list. ${outcome}`);
+  }
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (seen.has(item.fileId)) {
+      throw new Error(`fileId ${item.fileId} appears more than once in items. ${outcome}`);
+    }
+    seen.add(item.fileId);
+  }
+}
+
+async function trashFiles(
+  drive: drive_v3.Drive,
+  input: { items: { fileId: string; expectedName: string }[]; confirm?: boolean; confirmFolder?: boolean },
+): Promise<{ rows: TrashBatchRow[]; trashed: number; wouldTrash: number; refused: number; note: string }> {
+  const rows: TrashBatchRow[] = [];
+  for (const item of input.items) {
+    try {
+      const result = await trashFile(drive, { ...item, confirm: input.confirm, confirmFolder: input.confirmFolder });
+      if ("trashed" in result) {
+        rows.push({ ...item, status: "trashed", file: result.file, isFolder: result.isFolder });
+      } else {
+        rows.push({ ...item, status: "wouldTrash", file: result.file, isFolder: result.isFolder });
+      }
+    } catch (error) {
+      rows.push({ ...item, status: "refused", error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  const trashed = rows.filter((row) => row.status === "trashed").length;
+  const wouldTrash = rows.filter((row) => row.status === "wouldTrash").length;
+  const refused = rows.length - trashed - wouldTrash;
+  const note = input.confirm
+    ? `${trashed} moved to the Drive trash (restorable for 30 days), ${refused} refused and left untouched. Nothing is permanently deleted by this server.`
+    : `Preview only: ${wouldTrash} would be trashed, ${refused} would be refused. Nothing was trashed. Repeat with confirm: true.`;
+  return { rows, trashed, wouldTrash, refused, note };
+}
+
 // --- drive_export_file: readers and orchestration ---
 
 const SHEET_TABS_FIELDS = "sheets.properties(title,index,sheetId,gridProperties(rowCount,columnCount))";
@@ -1041,6 +1097,37 @@ export function registerDriveTools(server: McpServer): void {
         return await driveScopeAware(account, "Nothing was trashed.", async () => {
           const drive = await driveForAccount(account);
           return await trashFile(drive, { fileId, expectedName, confirm, confirmFolder });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_trash_files",
+    "Batch form of drive_trash_file for an accepted list: up to 100 {fileId, expectedName} items in one call, processed in order, one result row per item; a refused row (name mismatch, already in the trash, not found, no permission) never stops the others. Same guards as the single tool: expectedName must equal each file's current name, confirm: true is required to trash and without it the call only previews, and a folder needs confirmFolder: true. Trash only, restorable for 30 days; no permanent delete exists in this server.",
+    {
+      ...accountShape,
+      items: z
+        .array(
+          z.object({
+            fileId: z.string().min(1).describe("Drive file or folder id to trash."),
+            expectedName: z.string().min(1).describe("The file's current name, exactly."),
+          }),
+        )
+        .min(1)
+        .max(TRASH_BATCH_MAX)
+        .describe("The rows to trash, each with its id and its exact current name."),
+      confirm: z.boolean().optional().describe("Must be true to trash. Omitted or false: previews every row and changes nothing."),
+      confirmFolder: z
+        .boolean()
+        .optional()
+        .describe("Required in addition to confirm for rows that are folders; a folder row without it is refused, the others proceed."),
+    },
+    async ({ account, items, confirm, confirmFolder }) =>
+      safeTool(async () => {
+        return await driveScopeAware(account, "Nothing was trashed.", async () => {
+          assertTrashBatchInput(items, "Nothing was trashed.");
+          const drive = await driveForAccount(account);
+          return await trashFiles(drive, { items, confirm, confirmFolder });
         });
       }, account),
   );

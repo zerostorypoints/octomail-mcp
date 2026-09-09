@@ -2174,3 +2174,95 @@ test("drive_trash_file trashes a folder when both confirm and confirmFolder are 
     teardownAccountFixture();
   }
 });
+
+// --- end-to-end: drive_trash_files (batch) ---
+
+const BATCH_A = { id: "b1", name: "a.pdf", mimeType: "application/pdf", parents: ["p1"] };
+const BATCH_B = { id: "b2", name: "b.pdf", mimeType: "application/pdf", parents: ["p1"] };
+const BATCH_C_TRASHED = { id: "b3", name: "c.pdf", mimeType: "application/pdf", parents: ["p1"], trashed: true };
+
+function batchRoutes(): FakeRoute[] {
+  const byId: Record<string, unknown> = { b1: BATCH_A, b2: BATCH_B, b3: BATCH_C_TRASHED };
+  return [
+    { method: "GET", test: (p) => /^\/drive\/v3\/files\/b\d$/.test(p), respond: (url) => byId[url.pathname.split("/").pop()!] },
+    { method: "PATCH", test: (p) => /^\/drive\/v3\/files\/b\d$/.test(p), respond: (url) => ({ ...(byId[url.pathname.split("/").pop()!] as object), trashed: true }) },
+  ];
+}
+
+test("drive_trash_files refuses duplicate ids before any network call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(batchRoutes());
+
+    const result = await callTool(handlers, "drive_trash_files", {
+      account: ACCOUNT,
+      items: [
+        { fileId: "b1", expectedName: "a.pdf" },
+        { fileId: "b1", expectedName: "a.pdf" },
+      ],
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /appears more than once/);
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_files without confirm previews every row and writes nothing", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(batchRoutes());
+
+    const result = await callTool(handlers, "drive_trash_files", {
+      account: ACCOUNT,
+      items: [
+        { fileId: "b1", expectedName: "a.pdf" },
+        { fileId: "b2", expectedName: "b.pdf" },
+      ],
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.wouldTrash, 2);
+    assert.equal(result.trashed, 0);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_files with confirm trashes the good rows and reports the bad ones without stopping", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(batchRoutes());
+
+    const result = await callTool(handlers, "drive_trash_files", {
+      account: ACCOUNT,
+      items: [
+        { fileId: "b1", expectedName: "a.pdf" },
+        { fileId: "b2", expectedName: "wrong.pdf" },
+        { fileId: "b3", expectedName: "c.pdf" },
+      ],
+      confirm: true,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.trashed, 1);
+    assert.equal(result.refused, 2);
+    const rows = result.rows as { fileId: string; status: string; error?: string }[];
+    assert.deepEqual(rows.map((r) => [r.fileId, r.status]), [["b1", "trashed"], ["b2", "refused"], ["b3", "refused"]]);
+    assert.match(rows[1].error!, /is named "b\.pdf", not "wrong\.pdf"/);
+    assert.match(rows[2].error!, /in the trash/);
+    const patches = calls.filter((call) => call.method === "PATCH");
+    assert.deepEqual(patches.map((call) => call.pathname), ["/drive/v3/files/b1"]);
+  } finally {
+    teardownAccountFixture();
+  }
+});
