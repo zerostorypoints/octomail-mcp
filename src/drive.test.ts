@@ -2419,3 +2419,185 @@ test("drive_move_files refuses a row whose target already holds the name and mov
     teardownAccountFixture();
   }
 });
+
+
+// --- end-to-end: drive_create_spreadsheet ---
+
+const NEW_SHEET = { id: "newsheet", name: "Lista plac 2026", mimeType: SHEET_MIME, parents: ["parent1"] };
+const NEW_SHEET_META_BEFORE = {
+  sheets: [{ properties: { title: "Sheet1", index: 0, sheetId: 0, gridProperties: { rowCount: 1000, columnCount: 26 } } }],
+};
+const NEW_SHEET_META_AFTER = {
+  sheets: [
+    { properties: { title: "Aktualni", index: 0, sheetId: 0, gridProperties: { rowCount: 1000, columnCount: 26 } } },
+    { properties: { title: "Historia", index: 1, sheetId: 7, gridProperties: { rowCount: 1000, columnCount: 26 } } },
+  ],
+};
+
+function createSheetRoutes(options: { existing?: unknown[]; failFill?: boolean } = {}): FakeRoute[] {
+  let metaCalls = 0;
+  return [
+    { method: "GET", test: (p) => p === "/drive/v3/files/parent1", respond: () => PARENT_FOLDER },
+    { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: options.existing ?? [] }) },
+    { method: "POST", test: (p) => p === "/drive/v3/files", respond: () => NEW_SHEET },
+    {
+      method: "GET",
+      host: SHEETS_HOST,
+      test: (p) => p === "/v4/spreadsheets/newsheet",
+      respond: () => (metaCalls++ === 0 ? NEW_SHEET_META_BEFORE : NEW_SHEET_META_AFTER),
+    },
+    {
+      method: "POST",
+      host: SHEETS_HOST,
+      test: (p) => p === "/v4/spreadsheets/newsheet:batchUpdate",
+      respond: () => (options.failFill ? fakeReply(400, { error: { message: "bad tab title" } }) : { replies: [] }),
+    },
+    { method: "POST", host: SHEETS_HOST, test: (p) => p === "/v4/spreadsheets/newsheet/values:batchUpdate", respond: () => ({}) },
+  ];
+}
+
+const SHEETS_INPUT = [
+  { title: "Aktualni", rows: [["Nazwisko", "Netto"], ["Kowalska", "14710"]] },
+  { title: "Historia", rows: [] },
+];
+
+test("drive_create_spreadsheet with a token lacking the Drive scope refuses before any network call", async () => {
+  setupAccountFixture(false);
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(createSheetRoutes());
+
+    const result = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "Lista plac 2026",
+      folderId: "parent1",
+      sheets: SHEETS_INPUT,
+    });
+
+    assert.match(result.error as string, /authorized before Octomail requested Drive access/);
+    assert.equal(calls.length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_create_spreadsheet refuses duplicate tab titles and oversized data before any network call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(createSheetRoutes());
+
+    const dup = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "x",
+      folderId: "parent1",
+      sheets: [{ title: "A", rows: [] }, { title: "A", rows: [] }],
+    });
+    assert.match(dup.error as string, /appears more than once/);
+
+    const bad = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "x",
+      folderId: "parent1",
+      sheets: [{ title: "A/B", rows: [] }],
+    });
+    assert.match(bad.error as string, /Sheets does not allow/);
+
+    const big = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "x",
+      folderId: "parent1",
+      sheets: [{ title: "A", rows: Array.from({ length: 201 }, () => Array.from({ length: 100 }, () => "c")) }],
+    });
+    assert.match(big.error as string, /20100 cells; the cap is 20000/);
+
+    assert.equal(calls.length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_create_spreadsheet refuses when a same-named file exists and creates nothing", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(createSheetRoutes({ existing: [{ ...NEW_SHEET, id: "old1", webViewLink: "https://x/old1" }] }));
+
+    const result = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "Lista plac 2026",
+      folderId: "parent1",
+      sheets: SHEETS_INPUT,
+    });
+
+    assert.match(result.error as string, /already exists in that folder \(id old1/);
+    assert.match(result.error as string, /Nothing was created\.$/);
+    assert.ok(!calls.some((call) => call.method === "POST"));
+    assert.equal(sheetsCalls(calls).length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_create_spreadsheet creates the Sheet in the folder, renames the default tab, adds the rest and writes the rows", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(createSheetRoutes());
+
+    const result = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "Lista plac 2026",
+      folderId: "parent1",
+      sheets: SHEETS_INPUT,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal((result.file as { id: string }).id, "newsheet");
+    assert.equal(result.cells, 4);
+    assert.equal(result.valueInput, "USER_ENTERED");
+    assert.deepEqual((result.sheets as { title: string }[]).map((tab) => tab.title), ["Aktualni", "Historia"]);
+
+    const create = calls.find((call) => call.method === "POST" && call.pathname === "/drive/v3/files");
+    assert.ok(create?.body?.includes(SHEET_MIME) && create.body.includes('"parents":["parent1"]'), JSON.stringify(create));
+    assert.equal(create?.url.searchParams.get("supportsAllDrives"), "true");
+
+    const structure = calls.find((call) => call.pathname === "/v4/spreadsheets/newsheet:batchUpdate");
+    assert.ok(structure?.body?.includes('"updateSheetProperties"') && structure.body.includes('"title":"Aktualni"'), structure?.body);
+    assert.ok(structure?.body?.includes('"addSheet"') && structure.body.includes('"title":"Historia"'), structure?.body);
+
+    const values = calls.find((call) => call.pathname === "/v4/spreadsheets/newsheet/values:batchUpdate");
+    assert.ok(values?.body?.includes('"valueInputOption":"USER_ENTERED"'), values?.body);
+    assert.ok(values?.body?.includes('"Kowalska","14710"'), values?.body);
+    assert.ok(!values?.body?.includes("Historia"), "an empty tab gets no values write");
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_create_spreadsheet passes RAW through and names the created id when filling fails", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(createSheetRoutes({ failFill: true }));
+
+    const result = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "Lista plac 2026",
+      folderId: "parent1",
+      sheets: SHEETS_INPUT,
+      valueInput: "RAW",
+    });
+
+    assert.match(result.error as string, /The Sheet newsheet \("Lista plac 2026"\) was created in the folder but filling it failed/);
+    assert.match(result.error as string, /trash it with drive_trash_file/);
+    assert.ok(!calls.some((call) => call.pathname === "/v4/spreadsheets/newsheet/values:batchUpdate"));
+  } finally {
+    teardownAccountFixture();
+  }
+});

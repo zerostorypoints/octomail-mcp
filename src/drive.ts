@@ -919,6 +919,133 @@ async function moveFiles(
   };
 }
 
+// --- drive_create_spreadsheet ---
+//
+// A new Google Sheet, created directly in the target folder (files.create
+// with the Sheet mime type, so it lands on a shared drive with the right
+// owner), then filled in place through the Sheets API. The tool exists so a
+// session can hand the user a ready-made sheet (a payroll list, a plan) without
+// a binary upload and without ever editing a sheet that already exists:
+// it refuses a same-named file in the folder and never touches another id.
+
+export const SPREADSHEET_MAX_SHEETS = 20;
+export const SPREADSHEET_MAX_CELLS = 20000;
+const SPREADSHEET_MAX_CELL_CHARS = 50000;
+const SHEET_TITLE_FORBIDDEN = /[\[\]*?/\\:]/;
+
+export type SpreadsheetSheetInput = { title: string; rows: string[][] };
+
+export function assertSpreadsheetInput(
+  input: { name: string; sheets: SpreadsheetSheetInput[] },
+  outcome: string,
+): number {
+  assertDriveName(input.name, outcome);
+  if (input.sheets.length === 0) {
+    throw new Error(`sheets is empty; a spreadsheet needs at least one tab. ${outcome}`);
+  }
+  if (input.sheets.length > SPREADSHEET_MAX_SHEETS) {
+    throw new Error(`sheets has ${input.sheets.length} tabs; the cap is ${SPREADSHEET_MAX_SHEETS}. ${outcome}`);
+  }
+  const titles = new Set<string>();
+  let cells = 0;
+  for (const sheet of input.sheets) {
+    const title = sheet.title.normalize("NFC");
+    if (title.trim().length === 0 || title.length > 100) {
+      throw new Error(`Tab title "${sheet.title}" must be 1–100 characters. ${outcome}`);
+    }
+    if (SHEET_TITLE_FORBIDDEN.test(title)) {
+      throw new Error(`Tab title "${sheet.title}" contains one of [ ] * ? / \\ :, which Sheets does not allow. ${outcome}`);
+    }
+    if (titles.has(title)) {
+      throw new Error(`Tab title "${sheet.title}" appears more than once. ${outcome}`);
+    }
+    titles.add(title);
+    for (const row of sheet.rows) {
+      for (const cell of row) {
+        if (cell.length > SPREADSHEET_MAX_CELL_CHARS) {
+          throw new Error(`A cell on tab "${sheet.title}" is ${cell.length} characters; the cap is ${SPREADSHEET_MAX_CELL_CHARS}. ${outcome}`);
+        }
+        cells += 1;
+      }
+    }
+  }
+  if (cells > SPREADSHEET_MAX_CELLS) {
+    throw new Error(`The sheets carry ${cells} cells; the cap is ${SPREADSHEET_MAX_CELLS} per call. Split the data. ${outcome}`);
+  }
+  return cells;
+}
+
+export type CreateSpreadsheetResult = {
+  file: FileProjection;
+  sheets: SheetTab[];
+  cells: number;
+  valueInput: "USER_ENTERED" | "RAW";
+  note: string;
+};
+
+// Order of operations, and why: the folder is checked and the name collision
+// refused before anything is created; files.create makes the empty Sheet in
+// place; spreadsheets.get reveals the id of the default tab so it can be
+// renamed rather than left behind as an empty "Sheet1"; the remaining tabs
+// are added in one batchUpdate and every tab's rows written in one
+// values.batchUpdate. A failure after files.create leaves an empty or
+// partly filled Sheet behind — its id is in the error so it can be trashed.
+export async function createSpreadsheet(
+  drive: drive_v3.Drive,
+  sheets: sheets_v4.Sheets,
+  input: { name: string; folderId: string; sheets: SpreadsheetSheetInput[]; valueInput: "USER_ENTERED" | "RAW" },
+): Promise<CreateSpreadsheetResult> {
+  const outcome = "Nothing was created.";
+  const cells = assertSpreadsheetInput(input, outcome);
+  await getFolder(drive, input.folderId, outcome);
+  const existing = await findByExactName(drive, input.name, input.folderId);
+  if (existing) {
+    throw new Error(
+      `A file named "${input.name}" already exists in that folder (id ${existing.id}, ${existing.webViewLink}). Pass a different name; this tool never writes into an existing file. ${outcome}`,
+    );
+  }
+
+  const created = await drive.files.create({
+    requestBody: { name: input.name, mimeType: SHEET_MIME, parents: [input.folderId] },
+    fields: FILE_FIELDS,
+    supportsAllDrives: true,
+  });
+  const file = fileProjection(created.data);
+
+  try {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId: file.id, fields: SHEET_TABS_FIELDS });
+    const defaultTab = sheetTabsFromProperties(meta.data.sheets)[0];
+    const requests: sheets_v4.Schema$Request[] = [
+      { updateSheetProperties: { properties: { sheetId: defaultTab.sheetId, title: input.sheets[0].title }, fields: "title" } },
+      ...input.sheets.slice(1).map((sheet, i) => ({ addSheet: { properties: { title: sheet.title, index: i + 1 } } })),
+    ];
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId: file.id, requestBody: { requests } });
+
+    const data = input.sheets
+      .filter((sheet) => sheet.rows.length > 0)
+      .map((sheet) => ({ range: a1SheetRange(sheet.title), majorDimension: "ROWS", values: sheet.rows }));
+    if (data.length > 0) {
+      await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: file.id,
+        requestBody: { valueInputOption: input.valueInput, data },
+      });
+    }
+    const after = await sheets.spreadsheets.get({ spreadsheetId: file.id, fields: SHEET_TABS_FIELDS });
+    return {
+      file,
+      sheets: sheetTabsFromProperties(after.data.sheets),
+      cells,
+      valueInput: input.valueInput,
+      note: `Created ${file.name} (${file.id}) with ${input.sheets.length} tab(s) and ${cells} cells. Nothing else on Drive was changed.`,
+    };
+  } catch (error) {
+    const message = isServiceDisabledError(error) ? describeSheetsApiDisabled() : error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `The Sheet ${file.id} ("${file.name}") was created in the folder but filling it failed: ${message}. It may be empty or partly filled; trash it with drive_trash_file before retrying.`,
+    );
+  }
+}
+
 // --- drive_export_file: readers and orchestration ---
 
 const SHEET_TABS_FIELDS = "sheets.properties(title,index,sheetId,gridProperties(rowCount,columnCount))";
@@ -1252,6 +1379,36 @@ export function registerDriveTools(server: McpServer): void {
           assertTrashBatchInput(items, "Nothing was trashed.");
           const drive = await driveForAccount(account);
           return await trashFiles(drive, { items, confirm, confirmFolder });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_create_spreadsheet",
+    "Create a new Google Sheet in a Drive folder (My Drive or a shared drive) and fill its tabs in one call: name, folderId, and sheets as [{title, rows: string[][]}], up to 20 tabs and 20 000 cells. Refuses when a file with that name already exists in the folder; never writes into an existing spreadsheet, never shares. Values are written as USER_ENTERED by default (numbers and dates are parsed as a person typing them would get); pass valueInput: \"RAW\" to store every cell as literal text.",
+    {
+      ...accountShape,
+      name: z.string().min(1).describe("Spreadsheet name."),
+      folderId: z.string().min(1).describe("Target folder id (My Drive or a shared drive)."),
+      sheets: z
+        .array(
+          z.object({
+            title: z.string().min(1).describe("Tab title, 1–100 characters, none of [ ] * ? / \\ :"),
+            rows: z.array(z.array(z.string())).describe("Rows of cells, as strings; an empty array makes an empty tab."),
+          }),
+        )
+        .min(1)
+        .max(SPREADSHEET_MAX_SHEETS)
+        .describe("Tabs in order; the first replaces the default tab."),
+      valueInput: z.enum(["USER_ENTERED", "RAW"]).optional().describe("How cell text is interpreted. Default USER_ENTERED."),
+    },
+    async ({ account, name, folderId, sheets, valueInput }) =>
+      safeTool(async () => {
+        assertSpreadsheetInput({ name, sheets }, "Nothing was created.");
+        return await driveScopeAware(account, "Nothing was created.", async () => {
+          const drive = await driveForAccount(account);
+          const sheetsClient = await sheetsForAccount(account);
+          return await createSpreadsheet(drive, sheetsClient, { name, folderId, sheets, valueInput: valueInput ?? "USER_ENTERED" });
         });
       }, account),
   );
