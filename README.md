@@ -161,6 +161,7 @@ spam, and deletion actions unless the call carries an explicit
 | [docs/clients.md](docs/clients.md) | Wiring the server into Claude Code, Claude Desktop, and Codex |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Fixes for common authorization and config errors |
 | [docs/filter-playbook.md](docs/filter-playbook.md) | Field-tested workflow and lessons for cleaning up a mailbox with filters, backfills, and verification |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | The no-real-user-data rule for code, tests and docs, and the 2026-09-14 history rewrite |
 
 ## Commands
 
