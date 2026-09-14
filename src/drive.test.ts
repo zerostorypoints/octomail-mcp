@@ -17,6 +17,7 @@ import {
   assertMoveInput,
   capExportText,
   childrenQuery,
+  copyProvenanceDescription,
   describeSheetsApiDisabled,
   escapeDriveQueryValue,
   exactNameInFolderQuery,
@@ -238,6 +239,51 @@ test("provenanceDescription cuts to exactly 1000 characters and keeps the first 
   });
   assert.equal(description.length, 1000);
   assert.ok(description.startsWith("Saved by Octomail from Gmail account work, message msg1.\nSubject: "));
+});
+
+// --- copyProvenanceDescription ---
+
+const COPY_LINE = "Copied by Octomail from faktura.pdf (src1) on 2026-09-09T12:00:00.000Z.";
+
+test("copyProvenanceDescription is the single provenance line when the source has no description", () => {
+  const description = copyProvenanceDescription({
+    sourceName: "faktura.pdf",
+    sourceId: "src1",
+    copiedAt: "2026-09-09T12:00:00.000Z",
+  });
+  assert.equal(description, COPY_LINE);
+});
+
+test("copyProvenanceDescription keeps an existing description and appends the line after a newline", () => {
+  const description = copyProvenanceDescription({
+    sourceName: "faktura.pdf",
+    sourceId: "src1",
+    copiedAt: "2026-09-09T12:00:00.000Z",
+    existing: "Saved by Octomail from Gmail account work, message msg1.",
+  });
+  assert.equal(description, `Saved by Octomail from Gmail account work, message msg1.\n${COPY_LINE}`);
+});
+
+test("copyProvenanceDescription treats a whitespace-only existing description as absent", () => {
+  const description = copyProvenanceDescription({
+    sourceName: "faktura.pdf",
+    sourceId: "src1",
+    copiedAt: "2026-09-09T12:00:00.000Z",
+    existing: "  \n ",
+  });
+  assert.equal(description, COPY_LINE);
+});
+
+test("copyProvenanceDescription caps at 1000 characters by trimming the existing text, never the line", () => {
+  const description = copyProvenanceDescription({
+    sourceName: "faktura.pdf",
+    sourceId: "src1",
+    copiedAt: "2026-09-09T12:00:00.000Z",
+    existing: "x".repeat(2000),
+  });
+  assert.equal(description.length, 1000);
+  assert.ok(description.endsWith(`\n${COPY_LINE}`));
+  assert.ok(description.startsWith("xxx"));
 });
 
 // --- missingDriveScope ---
@@ -1588,6 +1634,969 @@ test("drive_export_file still returns the truncated text when the spill file can
     assert.equal(result.truncated, true);
     assert.equal("savedTo" in result, false);
     assert.match(result.notice as string, /failed/);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+// --- end-to-end: drive_copy_file ---
+//
+// Same fake-fetch harness. These prove the order of operations (scope ->
+// assertDriveName -> source files.get -> target files.get -> collision check
+// -> files.copy) via the recorded `calls` array, and that no request other
+// than the one POST to /copy ever writes anything.
+
+const COPY_SOURCE_ID = "src1";
+const COPY_TARGET = { id: "target1", name: "Faktury 2026", mimeType: FOLDER_MIME };
+const COPY_SOURCE_PDF = { id: COPY_SOURCE_ID, name: "faktura.pdf", mimeType: "application/pdf", parents: ["mydrive1"] };
+const COPY_SOURCE_DOC = { id: COPY_SOURCE_ID, name: "Umowa", mimeType: DOC_MIME, parents: ["mydrive1"] };
+const COPY_SOURCE_WITH_DESCRIPTION = { ...COPY_SOURCE_PDF, description: "Saved by Octomail from Gmail account work, message msg1." };
+const COPY_SOURCE_FOLDER = { id: COPY_SOURCE_ID, name: "Stare", mimeType: FOLDER_MIME, parents: ["mydrive1"] };
+const COPY_SOURCE_TRASHED = { ...COPY_SOURCE_PDF, trashed: true };
+const COPY_TARGET_NOT_FOLDER = { id: COPY_TARGET.id, name: "notes.txt", mimeType: "text/plain" };
+const COPY_RESULT_PDF = {
+  id: "copy1",
+  name: "faktura.pdf",
+  mimeType: "application/pdf",
+  parents: [COPY_TARGET.id],
+  webViewLink: "https://drive.google.com/file/d/copy1/view",
+};
+const COPY_RESULT_DOC = { ...COPY_RESULT_PDF, name: "Umowa", mimeType: DOC_MIME };
+const COPY_COLLISION_FILE = {
+  id: "collision-copy",
+  name: "faktura.pdf",
+  mimeType: "application/pdf",
+  webViewLink: "https://drive.google.com/file/d/collision-copy/view",
+};
+
+const COPY_PATH = `/drive/v3/files/${COPY_SOURCE_ID}/copy`;
+
+function copyRoutes(source: unknown, target: unknown = COPY_TARGET, existing: unknown[] = [], copy: unknown = COPY_RESULT_PDF): FakeRoute[] {
+  return [
+    { method: "GET", test: (p) => p === `/drive/v3/files/${COPY_SOURCE_ID}`, respond: () => source },
+    { method: "GET", test: (p) => p === `/drive/v3/files/${COPY_TARGET.id}`, respond: () => target },
+    { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: existing }) },
+    { method: "POST", test: (p) => p === COPY_PATH, respond: () => copy },
+  ];
+}
+
+function copyCall(calls: FakeCall[]): FakeCall | undefined {
+  return calls.find((call) => call.method === "POST" && call.pathname === COPY_PATH);
+}
+
+function assertNoWrite(calls: FakeCall[]): void {
+  assert.ok(
+    !calls.some((call) => call.method !== "GET"),
+    `expected only GET requests; calls were: ${JSON.stringify(calls)}`,
+  );
+}
+
+test("drive_copy_file with a token lacking the Drive scope refuses before any network call", async () => {
+  setupAccountFixture(false);
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(copyRoutes(COPY_SOURCE_PDF));
+
+    const result = await callTool(handlers, "drive_copy_file", {
+      account: ACCOUNT,
+      fileId: COPY_SOURCE_ID,
+      targetFolderId: COPY_TARGET.id,
+    });
+
+    assert.match(result.error as string, /npm run auth -- --account work/);
+    assert.match(result.error as string, /Nothing was copied\.$/);
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_copy_file with an invalid newName refuses before any network call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(copyRoutes(COPY_SOURCE_PDF));
+
+    const result = await callTool(handlers, "drive_copy_file", {
+      account: ACCOUNT,
+      fileId: COPY_SOURCE_ID,
+      targetFolderId: COPY_TARGET.id,
+      newName: "a/b.pdf",
+    });
+
+    assert.match(result.error as string, /cannot contain "\/"/);
+    assert.match(result.error as string, /Nothing was copied\.$/);
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_copy_file refuses a folder as the source before looking at the target", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(copyRoutes(COPY_SOURCE_FOLDER));
+
+    const result = await callTool(handlers, "drive_copy_file", {
+      account: ACCOUNT,
+      fileId: COPY_SOURCE_ID,
+      targetFolderId: COPY_TARGET.id,
+    });
+
+    assert.match(result.error as string, new RegExp(`File ${COPY_SOURCE_ID} is a folder`));
+    assert.match(result.error as string, /Nothing was copied\.$/);
+    assert.ok(
+      !calls.some((call) => call.pathname === `/drive/v3/files/${COPY_TARGET.id}`),
+      `expected no target lookup; calls were: ${JSON.stringify(calls)}`,
+    );
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_copy_file refuses a trashed source without a copy call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(copyRoutes(COPY_SOURCE_TRASHED));
+
+    const result = await callTool(handlers, "drive_copy_file", {
+      account: ACCOUNT,
+      fileId: COPY_SOURCE_ID,
+      targetFolderId: COPY_TARGET.id,
+    });
+
+    assert.match(result.error as string, /in the trash/);
+    assert.match(result.error as string, /Nothing was copied\.$/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_copy_file refuses a target that is not a folder without a copy call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(copyRoutes(COPY_SOURCE_PDF, COPY_TARGET_NOT_FOLDER));
+
+    const result = await callTool(handlers, "drive_copy_file", {
+      account: ACCOUNT,
+      fileId: COPY_SOURCE_ID,
+      targetFolderId: COPY_TARGET.id,
+    });
+
+    assert.match(result.error as string, /is not a folder \(mimeType text\/plain\)/);
+    assert.match(result.error as string, /Nothing was copied\.$/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_copy_file refuses on a name collision in the target folder, naming the existing file, without a copy call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(copyRoutes(COPY_SOURCE_PDF, COPY_TARGET, [COPY_COLLISION_FILE]));
+
+    const result = await callTool(handlers, "drive_copy_file", {
+      account: ACCOUNT,
+      fileId: COPY_SOURCE_ID,
+      targetFolderId: COPY_TARGET.id,
+    });
+
+    assert.match(result.error as string, /A file named "faktura\.pdf" already exists in that folder \(id collision-copy/);
+    assert.match(result.error as string, /Pass a different newName\. Nothing was copied\.$/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_copy_file copies a binary file into the target folder under the source name with a provenance description", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(copyRoutes(COPY_SOURCE_PDF));
+
+    const result = await callTool(handlers, "drive_copy_file", {
+      account: ACCOUNT,
+      fileId: COPY_SOURCE_ID,
+      targetFolderId: COPY_TARGET.id,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    const file = result.file as { id: string; name: string; mimeType: string; parents: string[]; webViewLink: string };
+    assert.equal(file.id, "copy1");
+    assert.equal(file.name, "faktura.pdf");
+    assert.equal(file.mimeType, "application/pdf");
+    assert.deepEqual(file.parents, [COPY_TARGET.id]);
+    assert.equal(file.webViewLink, COPY_RESULT_PDF.webViewLink);
+    assert.equal(result.sourceFileId, COPY_SOURCE_ID);
+
+    const call = copyCall(calls);
+    assert.ok(call?.body, `expected a POST to ${COPY_PATH} with a body; calls were: ${JSON.stringify(calls)}`);
+    const body = JSON.parse(call!.body!) as { name: string; parents: string[]; description: string; mimeType?: string };
+    assert.equal(body.name, "faktura.pdf");
+    assert.deepEqual(body.parents, [COPY_TARGET.id]);
+    assert.match(body.description, /^Copied by Octomail from faktura\.pdf \(src1\) on \d{4}-\d{2}-\d{2}T[\d:.]+Z\.$/);
+    assert.equal(body.mimeType, undefined);
+
+    // The source is never touched: no PATCH, no DELETE, and the only POST is the copy.
+    assert.deepEqual(
+      calls.filter((c) => c.method !== "GET").map((c) => `${c.method} ${c.pathname}`),
+      [`POST ${COPY_PATH}`],
+    );
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_copy_file copies a Google Doc as a Google Doc", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(copyRoutes(COPY_SOURCE_DOC, COPY_TARGET, [], COPY_RESULT_DOC));
+
+    const result = await callTool(handlers, "drive_copy_file", {
+      account: ACCOUNT,
+      fileId: COPY_SOURCE_ID,
+      targetFolderId: COPY_TARGET.id,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    const file = result.file as { name: string; mimeType: string; isFolder: boolean };
+    assert.equal(file.name, "Umowa");
+    assert.equal(file.mimeType, DOC_MIME);
+    assert.equal(file.isFolder, false);
+
+    const body = JSON.parse(copyCall(calls)!.body!) as { name: string; mimeType?: string };
+    assert.equal(body.name, "Umowa");
+    assert.equal(body.mimeType, undefined);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_copy_file applies newName to the collision check and the copy", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(
+      copyRoutes(COPY_SOURCE_PDF, COPY_TARGET, [], { ...COPY_RESULT_PDF, name: "2026-09 faktura.pdf" }),
+    );
+
+    const result = await callTool(handlers, "drive_copy_file", {
+      account: ACCOUNT,
+      fileId: COPY_SOURCE_ID,
+      targetFolderId: COPY_TARGET.id,
+      newName: "2026-09 faktura.pdf",
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal((result.file as { name: string }).name, "2026-09 faktura.pdf");
+
+    const listCall = calls.find((call) => call.method === "GET" && call.pathname === "/drive/v3/files");
+    assert.ok(listCall, `expected a collision check; calls were: ${JSON.stringify(calls)}`);
+    assert.equal(
+      listCall!.url.searchParams.get("q"),
+      `name = '2026-09 faktura.pdf' and '${COPY_TARGET.id}' in parents and trashed = false`,
+    );
+
+    const body = JSON.parse(copyCall(calls)!.body!) as { name: string; description: string };
+    assert.equal(body.name, "2026-09 faktura.pdf");
+    // Provenance names the source as it was, not the new name.
+    assert.match(body.description, /from faktura\.pdf \(src1\)/);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_copy_file keeps the source's existing description and appends the provenance line", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(copyRoutes(COPY_SOURCE_WITH_DESCRIPTION));
+
+    const result = await callTool(handlers, "drive_copy_file", {
+      account: ACCOUNT,
+      fileId: COPY_SOURCE_ID,
+      targetFolderId: COPY_TARGET.id,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    const body = JSON.parse(copyCall(calls)!.body!) as { description: string };
+    assert.ok(body.description.startsWith("Saved by Octomail from Gmail account work, message msg1.\n"));
+    assert.match(body.description, /\nCopied by Octomail from faktura\.pdf \(src1\) on .+Z\.$/);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_copy_file passes supportsAllDrives=true on every request it makes", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(copyRoutes(COPY_SOURCE_PDF));
+
+    const result = await callTool(handlers, "drive_copy_file", {
+      account: ACCOUNT,
+      fileId: COPY_SOURCE_ID,
+      targetFolderId: COPY_TARGET.id,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.deepEqual(
+      calls.map((call) => `${call.method} ${call.pathname}`),
+      [
+        `GET /drive/v3/files/${COPY_SOURCE_ID}`,
+        `GET /drive/v3/files/${COPY_TARGET.id}`,
+        "GET /drive/v3/files",
+        `POST ${COPY_PATH}`,
+      ],
+    );
+    for (const call of calls) {
+      assert.equal(
+        call.url.searchParams.get("supportsAllDrives"),
+        "true",
+        `expected supportsAllDrives=true on ${call.method} ${call.pathname}`,
+      );
+    }
+    // The source lookup asks for its description, so the copy can carry it forward.
+    assert.match(calls[0].url.searchParams.get("fields") ?? "", /description/);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+// --- end-to-end: drive_trash_file ---
+//
+// Same fake-fetch harness. The write is one PATCH with {trashed: true}; every
+// refusal and the confirm-less preview must leave the recorded calls free of
+// anything but GET.
+
+const TRASH_ID = "t1";
+const TRASH_PATH = `/drive/v3/files/${TRASH_ID}`;
+const TRASH_FILE = { id: TRASH_ID, name: "PO_12_stare.pdf", mimeType: "application/pdf", parents: ["p1"] };
+const TRASH_FOLDER = { id: TRASH_ID, name: "Podpisane", mimeType: FOLDER_MIME, parents: ["p1"] };
+const TRASH_FILE_TRASHED = { ...TRASH_FILE, trashed: true };
+const TRASH_RESULT = { ...TRASH_FILE, trashed: true, webViewLink: "https://drive.google.com/file/d/t1/view" };
+
+function trashRoutes(file: unknown): FakeRoute[] {
+  return [
+    { method: "GET", test: (p) => p === TRASH_PATH, respond: () => file },
+    { method: "PATCH", test: (p) => p === TRASH_PATH, respond: () => TRASH_RESULT },
+  ];
+}
+
+function trashCall(calls: FakeCall[]): FakeCall | undefined {
+  return calls.find((call) => call.method === "PATCH" && call.pathname === TRASH_PATH);
+}
+
+test("drive_trash_file with a token lacking the Drive scope refuses before any network call", async () => {
+  setupAccountFixture(false);
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FILE));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FILE.name,
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /Nothing was trashed\.$/);
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file without confirm returns a preview and writes nothing", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FILE));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FILE.name,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.wouldTrash, true);
+    assert.equal(result.trashed, undefined);
+    assert.equal((result.file as { name: string }).name, TRASH_FILE.name);
+    assert.match(result.note as string, /confirm: true/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file refuses when expectedName differs from the file's name, even with confirm", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FILE));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: "PO_12_inny.pdf",
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /is named "PO_12_stare\.pdf", not "PO_12_inny\.pdf"/);
+    assert.match(result.error as string, /Nothing was trashed\.$/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file refuses a file already in the trash", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FILE_TRASHED));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FILE.name,
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /in the trash/);
+    assert.match(result.error as string, /Nothing was trashed\.$/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file refuses a folder without confirmFolder", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FOLDER));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FOLDER.name,
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /is a folder; trashing it trashes everything inside it/);
+    assert.match(result.error as string, /Nothing was trashed\.$/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file with confirm sends one PATCH with trashed=true and nothing else", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FILE));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FILE.name,
+      confirm: true,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.trashed, true);
+    assert.equal(result.isFolder, false);
+    assert.match(result.note as string, /30 days/);
+
+    const patch = trashCall(calls);
+    assert.ok(patch, `expected a PATCH to ${TRASH_PATH}; calls were: ${JSON.stringify(calls)}`);
+    assert.deepEqual(JSON.parse(patch!.body ?? "{}"), { trashed: true });
+    assert.equal(patch!.url.searchParams.get("supportsAllDrives"), "true");
+    assert.ok(
+      !calls.some((call) => call.method === "DELETE"),
+      `expected no DELETE; calls were: ${JSON.stringify(calls)}`,
+    );
+    assert.equal(calls.filter((call) => call.method !== "GET").length, 1);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file trashes a folder when both confirm and confirmFolder are true", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_FOLDER));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FOLDER.name,
+      confirm: true,
+      confirmFolder: true,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.trashed, true);
+    assert.equal(result.isFolder, true);
+    assert.ok(trashCall(calls));
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+// --- end-to-end: drive_trash_files (batch) ---
+
+const BATCH_A = { id: "b1", name: "a.pdf", mimeType: "application/pdf", parents: ["p1"] };
+const BATCH_B = { id: "b2", name: "b.pdf", mimeType: "application/pdf", parents: ["p1"] };
+const BATCH_C_TRASHED = { id: "b3", name: "c.pdf", mimeType: "application/pdf", parents: ["p1"], trashed: true };
+
+function batchRoutes(): FakeRoute[] {
+  const byId: Record<string, unknown> = { b1: BATCH_A, b2: BATCH_B, b3: BATCH_C_TRASHED };
+  return [
+    { method: "GET", test: (p) => /^\/drive\/v3\/files\/b\d$/.test(p), respond: (url) => byId[url.pathname.split("/").pop()!] },
+    { method: "PATCH", test: (p) => /^\/drive\/v3\/files\/b\d$/.test(p), respond: (url) => ({ ...(byId[url.pathname.split("/").pop()!] as object), trashed: true }) },
+  ];
+}
+
+test("drive_trash_files refuses duplicate ids before any network call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(batchRoutes());
+
+    const result = await callTool(handlers, "drive_trash_files", {
+      account: ACCOUNT,
+      items: [
+        { fileId: "b1", expectedName: "a.pdf" },
+        { fileId: "b1", expectedName: "a.pdf" },
+      ],
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /appears more than once/);
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_files without confirm previews every row and writes nothing", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(batchRoutes());
+
+    const result = await callTool(handlers, "drive_trash_files", {
+      account: ACCOUNT,
+      items: [
+        { fileId: "b1", expectedName: "a.pdf" },
+        { fileId: "b2", expectedName: "b.pdf" },
+      ],
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.wouldTrash, 2);
+    assert.equal(result.trashed, 0);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_files with confirm trashes the good rows and reports the bad ones without stopping", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(batchRoutes());
+
+    const result = await callTool(handlers, "drive_trash_files", {
+      account: ACCOUNT,
+      items: [
+        { fileId: "b1", expectedName: "a.pdf" },
+        { fileId: "b2", expectedName: "wrong.pdf" },
+        { fileId: "b3", expectedName: "c.pdf" },
+      ],
+      confirm: true,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.trashed, 1);
+    assert.equal(result.refused, 2);
+    const rows = result.rows as { fileId: string; status: string; error?: string }[];
+    assert.deepEqual(rows.map((r) => [r.fileId, r.status]), [["b1", "trashed"], ["b2", "refused"], ["b3", "refused"]]);
+    assert.match(rows[1].error!, /is named "b\.pdf", not "wrong\.pdf"/);
+    assert.match(rows[2].error!, /in the trash/);
+    const patches = calls.filter((call) => call.method === "PATCH");
+    assert.deepEqual(patches.map((call) => call.pathname), ["/drive/v3/files/b1"]);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+// --- drive_trash_file: NFC/NFD names and owner-aware refusals ---
+
+const TRASH_NFD = { id: TRASH_ID, name: "Załącznik 1.pdf".normalize("NFD"), mimeType: "application/pdf", parents: ["p1"], owners: [{ emailAddress: "office@example.com" }] };
+const TRASH_OWNED_ELSEWHERE = { ...TRASH_FILE, owners: [{ emailAddress: "anna@example.com" }] };
+
+test("drive_trash_file accepts an NFC expectedName for a file Drive stores in NFD", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_NFD));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: "Załącznik 1.pdf".normalize("NFC"),
+      confirm: true,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.trashed, true);
+    assert.deepEqual(result.owners, ["office@example.com"]);
+    assert.ok(trashCall(calls));
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file names the owner when Drive refuses the trash with 403", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    installFakeNetwork([
+      { method: "GET", test: (p) => p === TRASH_PATH, respond: () => TRASH_OWNED_ELSEWHERE },
+      { method: "PATCH", test: (p) => p === TRASH_PATH, respond: () => fakeReply(403, { error: { code: 403, message: "The user does not have sufficient permissions for this file." } }) },
+    ]);
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FILE.name,
+      confirm: true,
+    });
+
+    assert.match(result.error as string, /owned by anna@example\.com/);
+    assert.match(result.error as string, /only its owner can move it to the trash/);
+    assert.match(result.error as string, /Nothing was trashed\.$/);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_trash_file preview reports the owners without writing", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(trashRoutes(TRASH_OWNED_ELSEWHERE));
+
+    const result = await callTool(handlers, "drive_trash_file", {
+      account: ACCOUNT,
+      fileId: TRASH_ID,
+      expectedName: TRASH_FILE.name,
+    });
+
+    assert.equal(result.wouldTrash, true);
+    assert.deepEqual(result.owners, ["anna@example.com"]);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+// --- end-to-end: drive_move_files (batch) ---
+
+const MB_TARGET = { id: "mbt", name: "Target", mimeType: FOLDER_MIME };
+const MB_A = { id: "ma", name: "a.pdf", mimeType: "application/pdf", parents: ["old"] };
+const MB_B = { id: "mb", name: "b.pdf", mimeType: "application/pdf", parents: ["old"] };
+const MB_C = { id: "mc", name: "c.pdf", mimeType: "application/pdf", parents: ["old"] };
+
+function moveBatchRoutes(existingInTarget: unknown[] = []): FakeRoute[] {
+  const byId: Record<string, unknown> = { ma: MB_A, mb: MB_B, mc: MB_C, mbt: MB_TARGET };
+  return [
+    { method: "GET", test: (p) => /^\/drive\/v3\/files\/m[abc]$/.test(p) || p === `/drive/v3/files/${MB_TARGET.id}`, respond: (url) => byId[url.pathname.split("/").pop()!] },
+    { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: existingInTarget }) },
+    { method: "PATCH", test: (p) => /^\/drive\/v3\/files\/m[abc]$/.test(p), respond: (url) => ({ ...(byId[url.pathname.split("/").pop()!] as object), parents: [MB_TARGET.id] }) },
+  ];
+}
+
+test("drive_move_files refuses duplicate ids before any network call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(moveBatchRoutes());
+    const result = await callTool(handlers, "drive_move_files", {
+      account: ACCOUNT,
+      items: [{ fileId: "ma", folderId: MB_TARGET.id }, { fileId: "ma", folderId: MB_TARGET.id }],
+    });
+    assert.match(result.error as string, /appears more than once/);
+    assert.deepEqual(calls, []);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_move_files moves the good rows and reports a bad row without stopping", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(moveBatchRoutes());
+    const result = await callTool(handlers, "drive_move_files", {
+      account: ACCOUNT,
+      items: [
+        { fileId: "ma", folderId: MB_TARGET.id },
+        { fileId: "mb" },
+        { fileId: "mc", folderId: MB_TARGET.id, name: "a/b.pdf" },
+      ],
+    });
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(result.moved, 1);
+    assert.equal(result.refused, 2);
+    const rows = result.rows as { fileId: string; status: string; error?: string; previousParents?: string[] }[];
+    assert.deepEqual(rows.map((r) => [r.fileId, r.status]), [["ma", "moved"], ["mb", "refused"], ["mc", "refused"]]);
+    assert.deepEqual(rows[0].previousParents, ["old"]);
+    assert.match(rows[1].error!, /Pass folderId to move, name to rename, or both/);
+    assert.match(rows[2].error!, /cannot contain "\/"/);
+    const patches = calls.filter((call) => call.method === "PATCH");
+    assert.deepEqual(patches.map((call) => call.pathname), ["/drive/v3/files/ma"]);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_move_files refuses a row whose target already holds the name and moves the rest", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    installFakeNetwork(moveBatchRoutes([{ id: "clash", name: "a.pdf", mimeType: "application/pdf", webViewLink: "https://x/clash" }]));
+    const result = await callTool(handlers, "drive_move_files", {
+      account: ACCOUNT,
+      items: [{ fileId: "ma", folderId: MB_TARGET.id }],
+    });
+    assert.equal(result.refused, 1);
+    assert.match((result.rows as { error: string }[])[0].error, /already exists in that folder/);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+
+// --- end-to-end: drive_create_spreadsheet ---
+
+const NEW_SHEET = { id: "newsheet", name: "Lista plac 2026", mimeType: SHEET_MIME, parents: ["parent1"] };
+const NEW_SHEET_META_BEFORE = {
+  sheets: [{ properties: { title: "Sheet1", index: 0, sheetId: 0, gridProperties: { rowCount: 1000, columnCount: 26 } } }],
+};
+const NEW_SHEET_META_AFTER = {
+  sheets: [
+    { properties: { title: "Aktualni", index: 0, sheetId: 0, gridProperties: { rowCount: 1000, columnCount: 26 } } },
+    { properties: { title: "Historia", index: 1, sheetId: 7, gridProperties: { rowCount: 1000, columnCount: 26 } } },
+  ],
+};
+
+function createSheetRoutes(options: { existing?: unknown[]; failFill?: boolean } = {}): FakeRoute[] {
+  let metaCalls = 0;
+  return [
+    { method: "GET", test: (p) => p === "/drive/v3/files/parent1", respond: () => PARENT_FOLDER },
+    { method: "GET", test: (p) => p === "/drive/v3/files", respond: () => ({ files: options.existing ?? [] }) },
+    { method: "POST", test: (p) => p === "/drive/v3/files", respond: () => NEW_SHEET },
+    {
+      method: "GET",
+      host: SHEETS_HOST,
+      test: (p) => p === "/v4/spreadsheets/newsheet",
+      respond: () => (metaCalls++ === 0 ? NEW_SHEET_META_BEFORE : NEW_SHEET_META_AFTER),
+    },
+    {
+      method: "POST",
+      host: SHEETS_HOST,
+      test: (p) => p === "/v4/spreadsheets/newsheet:batchUpdate",
+      respond: () => (options.failFill ? fakeReply(400, { error: { message: "bad tab title" } }) : { replies: [] }),
+    },
+    { method: "POST", host: SHEETS_HOST, test: (p) => p === "/v4/spreadsheets/newsheet/values:batchUpdate", respond: () => ({}) },
+  ];
+}
+
+const SHEETS_INPUT = [
+  { title: "Aktualni", rows: [["Nazwisko", "Netto"], ["Kowalska", "14710"]] },
+  { title: "Historia", rows: [] },
+];
+
+test("drive_create_spreadsheet with a token lacking the Drive scope refuses before any network call", async () => {
+  setupAccountFixture(false);
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(createSheetRoutes());
+
+    const result = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "Lista plac 2026",
+      folderId: "parent1",
+      sheets: SHEETS_INPUT,
+    });
+
+    assert.match(result.error as string, /authorized before Octomail requested Drive access/);
+    assert.equal(calls.length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_create_spreadsheet refuses duplicate tab titles and oversized data before any network call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(createSheetRoutes());
+
+    const dup = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "x",
+      folderId: "parent1",
+      sheets: [{ title: "A", rows: [] }, { title: "A", rows: [] }],
+    });
+    assert.match(dup.error as string, /appears more than once/);
+
+    const bad = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "x",
+      folderId: "parent1",
+      sheets: [{ title: "A/B", rows: [] }],
+    });
+    assert.match(bad.error as string, /Sheets does not allow/);
+
+    const big = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "x",
+      folderId: "parent1",
+      sheets: [{ title: "A", rows: Array.from({ length: 201 }, () => Array.from({ length: 100 }, () => "c")) }],
+    });
+    assert.match(big.error as string, /20100 cells; the cap is 20000/);
+
+    assert.equal(calls.length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_create_spreadsheet refuses when a same-named file exists and creates nothing", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(createSheetRoutes({ existing: [{ ...NEW_SHEET, id: "old1", webViewLink: "https://x/old1" }] }));
+
+    const result = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "Lista plac 2026",
+      folderId: "parent1",
+      sheets: SHEETS_INPUT,
+    });
+
+    assert.match(result.error as string, /already exists in that folder \(id old1/);
+    assert.match(result.error as string, /Nothing was created\.$/);
+    assert.ok(!calls.some((call) => call.method === "POST"));
+    assert.equal(sheetsCalls(calls).length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_create_spreadsheet creates the Sheet in the folder, renames the default tab, adds the rest and writes the rows", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(createSheetRoutes());
+
+    const result = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "Lista plac 2026",
+      folderId: "parent1",
+      sheets: SHEETS_INPUT,
+    });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal((result.file as { id: string }).id, "newsheet");
+    assert.equal(result.cells, 4);
+    assert.equal(result.valueInput, "USER_ENTERED");
+    assert.deepEqual((result.sheets as { title: string }[]).map((tab) => tab.title), ["Aktualni", "Historia"]);
+
+    const create = calls.find((call) => call.method === "POST" && call.pathname === "/drive/v3/files");
+    assert.ok(create?.body?.includes(SHEET_MIME) && create.body.includes('"parents":["parent1"]'), JSON.stringify(create));
+    assert.equal(create?.url.searchParams.get("supportsAllDrives"), "true");
+
+    const structure = calls.find((call) => call.pathname === "/v4/spreadsheets/newsheet:batchUpdate");
+    assert.ok(structure?.body?.includes('"updateSheetProperties"') && structure.body.includes('"title":"Aktualni"'), structure?.body);
+    assert.ok(structure?.body?.includes('"addSheet"') && structure.body.includes('"title":"Historia"'), structure?.body);
+
+    const values = calls.find((call) => call.pathname === "/v4/spreadsheets/newsheet/values:batchUpdate");
+    assert.ok(values?.body?.includes('"valueInputOption":"USER_ENTERED"'), values?.body);
+    assert.ok(values?.body?.includes('"Kowalska","14710"'), values?.body);
+    assert.ok(!values?.body?.includes("Historia"), "an empty tab gets no values write");
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_create_spreadsheet passes RAW through and names the created id when filling fails", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(createSheetRoutes({ failFill: true }));
+
+    const result = await callTool(handlers, "drive_create_spreadsheet", {
+      account: ACCOUNT,
+      name: "Lista plac 2026",
+      folderId: "parent1",
+      sheets: SHEETS_INPUT,
+      valueInput: "RAW",
+    });
+
+    assert.match(result.error as string, /The Sheet newsheet \("Lista plac 2026"\) was created in the folder but filling it failed/);
+    assert.match(result.error as string, /trash it with drive_trash_file/);
+    assert.ok(!calls.some((call) => call.pathname === "/v4/spreadsheets/newsheet/values:batchUpdate"));
   } finally {
     teardownAccountFixture();
   }

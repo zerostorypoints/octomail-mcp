@@ -149,6 +149,27 @@ export function provenanceDescription(input: {
   return lines.join("\n").slice(0, 1000);
 }
 
+// Provenance for drive_copy_file, phrased like provenanceDescription. An
+// existing description is kept in front so a copy of a copy carries its whole
+// lineage; the 1000-character cap trims that existing text from its end and
+// never the provenance line, which is the part a reader needs intact.
+export const MAX_DESCRIPTION_CHARS = 1000;
+
+export function copyProvenanceDescription(input: {
+  sourceName: string;
+  sourceId: string;
+  copiedAt: string;
+  existing?: string | null;
+}): string {
+  const line = `Copied by Octomail from ${input.sourceName} (${input.sourceId}) on ${input.copiedAt}.`;
+  const existing = (input.existing ?? "").trim();
+  if (existing.length === 0) {
+    return line.slice(0, MAX_DESCRIPTION_CHARS);
+  }
+  const room = MAX_DESCRIPTION_CHARS - line.length - 1;
+  return `${existing.slice(0, Math.max(room, 0))}\n${line}`;
+}
+
 // --- drive_export_file: pure helpers ---
 
 export const SHEET_MIME = "application/vnd.google-apps.spreadsheet";
@@ -365,17 +386,20 @@ function isNotFoundError(error: unknown): boolean {
 // phrase and noun ("Folder" / "File") come from the caller so the refusal
 // reads the way that tool promises — "Nothing was changed." for
 // create/move, "Nothing was uploaded." for a future upload tool.
+const CHECK_FIELDS = "id,name,mimeType,parents,trashed";
+
 async function getDriveFileForCheck(
   drive: drive_v3.Drive,
   fileId: string,
   outcome: string,
   noun: "Folder" | "File",
+  fields: string = CHECK_FIELDS,
 ): Promise<drive_v3.Schema$File> {
   let file: drive_v3.Schema$File;
   try {
     const response = await drive.files.get({
       fileId,
-      fields: "id,name,mimeType,parents,trashed",
+      fields,
       supportsAllDrives: true,
     });
     file = response.data;
@@ -411,6 +435,26 @@ export async function getFolder(drive: drive_v3.Drive, folderId: string, outcome
 export async function getFile(drive: drive_v3.Drive, fileId: string, outcome: string): Promise<FileProjection> {
   const file = await getDriveFileForCheck(drive, fileId, outcome, "File");
   return fileProjection(file);
+}
+
+// The source of a copy: any file but a folder, with its description fetched
+// too so the copy can carry it forward. A folder is refused here, before the
+// target is looked at, because files.copy on a folder is not something Drive
+// does either — it would fail later with a less useful message.
+export async function getFileForCopy(
+  drive: drive_v3.Drive,
+  fileId: string,
+  outcome: string,
+): Promise<{ file: FileProjection; description?: string }> {
+  const file = await getDriveFileForCheck(drive, fileId, outcome, "File", `${CHECK_FIELDS},description`);
+  if (file.mimeType === FOLDER_MIME) {
+    throw new Error(`File ${fileId} is a folder. drive_copy_file copies files only, not folders. ${outcome}`);
+  }
+  const result: { file: FileProjection; description?: string } = { file: fileProjection(file) };
+  if (typeof file.description === "string") {
+    result.description = file.description;
+  }
+  return result;
 }
 
 const FILE_FIELDS = "id,name,mimeType,size,modifiedTime,parents,webViewLink,md5Checksum";
@@ -609,6 +653,397 @@ async function moveFile(
     previousParents,
     previousName: file.name,
   };
+}
+
+// Same check-before-write shape as saveAttachmentToDrive and moveFile: source
+// validated, then target, then the collision check, then the one write. The
+// source is only ever read; the collision check does not exclude the source
+// id, because a source already sitting in the target folder under the target
+// name would make the copy a duplicate, which is what the check refuses.
+async function copyFile(
+  drive: drive_v3.Drive,
+  input: { fileId: string; targetFolderId: string; newName?: string; copiedAt: string },
+): Promise<{ file: FileProjection; sourceFileId: string }> {
+  const outcome = "Nothing was copied.";
+  const source = await getFileForCopy(drive, input.fileId, outcome);
+
+  await getFolder(drive, input.targetFolderId, outcome);
+
+  const targetName = input.newName ?? source.file.name;
+  const existing = await findByExactName(drive, targetName, input.targetFolderId);
+  if (existing) {
+    throw new Error(
+      `A file named "${targetName}" already exists in that folder (id ${existing.id}, ${existing.webViewLink}). Pass a different newName. ${outcome}`,
+    );
+  }
+
+  const description = copyProvenanceDescription({
+    sourceName: source.file.name,
+    sourceId: source.file.id,
+    copiedAt: input.copiedAt,
+    existing: source.description,
+  });
+
+  // No mimeType in the body: Drive keeps the source's type, so a Google Doc
+  // copies as a Google Doc and a PDF as a PDF.
+  const response = await drive.files.copy({
+    fileId: input.fileId,
+    requestBody: { name: targetName, parents: [input.targetFolderId], description },
+    fields: FILE_FIELDS,
+    supportsAllDrives: true,
+  });
+
+  return { file: fileProjection(response.data), sourceFileId: input.fileId };
+}
+
+// --- drive_trash_file ---
+
+// The one Drive tool that removes anything, and it only ever moves a file to
+// the trash: files.update with trashed=true, which Drive undoes from the
+// trash for 30 days. There is no permanent delete and no emptyTrash here,
+// and there never will be a second flag that turns this into one.
+//
+// Two guards sit in front of the write. `expectedName` must equal the file's
+// current name exactly, so a wrong or stale id (Drive ids are opaque; a
+// deletion list built yesterday can point at a file renamed today) is
+// refused rather than acted on. `confirm` must be true, otherwise the call
+// returns the file it would trash and changes nothing, so the decision is
+// made against the real name, type and parents. A folder needs
+// `confirmFolder: true` on top, because trashing a folder takes everything
+// inside it along.
+export function assertTrashPreconditions(
+  file: FileProjection,
+  input: { expectedName: string; confirm?: boolean; confirmFolder?: boolean },
+  outcome: string,
+): { wouldTrash: true; file: FileProjection; isFolder: boolean } | undefined {
+  // Names are compared after NFC normalisation: Drive stores what the
+  // uploading client sent, and a macOS upload carries decomposed accents
+  // (NFD, "ł" as "l" + combining stroke) while a name typed or copied
+  // elsewhere is precomposed (NFC). Both spell the same file name.
+  if (file.name.normalize("NFC") !== input.expectedName.normalize("NFC")) {
+    throw new Error(
+      `File ${file.id} is named "${file.name}", not "${input.expectedName}". The id and the expected name do not match; check the id. ${outcome}`,
+    );
+  }
+  const isFolder = file.mimeType === FOLDER_MIME;
+  if (!input.confirm) {
+    return { wouldTrash: true, file, isFolder };
+  }
+  if (isFolder && !input.confirmFolder) {
+    throw new Error(
+      `File ${file.id} ("${file.name}") is a folder; trashing it trashes everything inside it. Repeat the call with confirmFolder: true if that is intended. ${outcome}`,
+    );
+  }
+  return undefined;
+}
+
+async function trashFile(
+  drive: drive_v3.Drive,
+  input: { fileId: string; expectedName: string; confirm?: boolean; confirmFolder?: boolean },
+): Promise<
+  | { wouldTrash: true; file: FileProjection; isFolder: boolean; owners: string[]; note: string }
+  | { trashed: true; file: FileProjection; isFolder: boolean; owners: string[]; note: string }
+> {
+  const outcome = "Nothing was trashed.";
+  const { file, owners } = await getFileForTrash(drive, input.fileId, outcome);
+
+  const preview = assertTrashPreconditions(file, input, outcome);
+  if (preview) {
+    return {
+      ...preview,
+      owners,
+      note: "Nothing was trashed. Repeat the call with confirm: true to move this file to the Drive trash.",
+    };
+  }
+
+  let response: { data: drive_v3.Schema$File };
+  try {
+    response = await drive.files.update({
+      fileId: input.fileId,
+      requestBody: { trashed: true },
+      fields: `${FILE_FIELDS},trashed`,
+      supportsAllDrives: true,
+    });
+  } catch (error) {
+    // Only an owner (or an organiser on a shared drive) may trash a file;
+    // an editor who is not the owner gets a 403. Naming the owner turns
+    // "insufficient permissions" into an action: transfer ownership, or ask
+    // the owner.
+    if (isForbiddenError(error)) {
+      throw new Error(
+        `File ${file.id} ("${file.name}") is owned by ${owners.length ? owners.join(", ") : "another account"}, and only its owner can move it to the trash. Transfer ownership to this account or ask the owner. ${outcome}`,
+      );
+    }
+    throw error;
+  }
+
+  return {
+    trashed: true,
+    file: fileProjection(response.data),
+    isFolder: file.mimeType === FOLDER_MIME,
+    owners,
+    note: "Moved to the Drive trash, where Drive keeps it for 30 days and it can be restored. Nothing is permanently deleted by this server.",
+  };
+}
+
+// The trash lookup also fetches the owners, so the preview shows who owns
+// the file before anything is attempted, and a permission refusal can name
+// them.
+export async function getFileForTrash(
+  drive: drive_v3.Drive,
+  fileId: string,
+  outcome: string,
+): Promise<{ file: FileProjection; owners: string[] }> {
+  const raw = await getDriveFileForCheck(drive, fileId, outcome, "File", `${CHECK_FIELDS},owners(emailAddress)`);
+  const owners = (raw.owners ?? []).map((owner) => owner.emailAddress).filter((email): email is string => Boolean(email));
+  return { file: fileProjection(raw), owners };
+}
+
+function isForbiddenError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: unknown; status?: unknown; response?: { status?: unknown } };
+  return candidate.code === 403 || candidate.status === 403 || candidate.response?.status === 403;
+}
+
+// Batch form of the same operation for a list the user has accepted: one call,
+// one row per item, no row aborts the others. Each row goes through the
+// identical trashFile path (name guard, confirm, confirmFolder, already
+// trashed), so the batch is not a looser gate, only a shorter transcript.
+// Rows are processed in order and sequentially, and a row that fails is
+// reported with Google's or this server's message and nothing else changes
+// for it.
+export const TRASH_BATCH_MAX = 100;
+
+export type TrashBatchRow =
+  | { fileId: string; expectedName: string; status: "trashed"; file: FileProjection; isFolder: boolean; owners: string[] }
+  | { fileId: string; expectedName: string; status: "wouldTrash"; file: FileProjection; isFolder: boolean; owners: string[] }
+  | { fileId: string; expectedName: string; status: "refused"; error: string };
+
+export function assertTrashBatchInput(items: { fileId: string; expectedName: string }[], outcome: string): void {
+  if (items.length === 0) {
+    throw new Error(`items is empty. ${outcome}`);
+  }
+  if (items.length > TRASH_BATCH_MAX) {
+    throw new Error(`items has ${items.length} rows; the cap is ${TRASH_BATCH_MAX} per call. Split the list. ${outcome}`);
+  }
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (seen.has(item.fileId)) {
+      throw new Error(`fileId ${item.fileId} appears more than once in items. ${outcome}`);
+    }
+    seen.add(item.fileId);
+  }
+}
+
+async function trashFiles(
+  drive: drive_v3.Drive,
+  input: { items: { fileId: string; expectedName: string }[]; confirm?: boolean; confirmFolder?: boolean },
+): Promise<{ rows: TrashBatchRow[]; trashed: number; wouldTrash: number; refused: number; note: string }> {
+  const rows: TrashBatchRow[] = [];
+  for (const item of input.items) {
+    try {
+      const result = await trashFile(drive, { ...item, confirm: input.confirm, confirmFolder: input.confirmFolder });
+      if ("trashed" in result) {
+        rows.push({ ...item, status: "trashed", file: result.file, isFolder: result.isFolder, owners: result.owners });
+      } else {
+        rows.push({ ...item, status: "wouldTrash", file: result.file, isFolder: result.isFolder, owners: result.owners });
+      }
+    } catch (error) {
+      rows.push({ ...item, status: "refused", error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  const trashed = rows.filter((row) => row.status === "trashed").length;
+  const wouldTrash = rows.filter((row) => row.status === "wouldTrash").length;
+  const refused = rows.length - trashed - wouldTrash;
+  const note = input.confirm
+    ? `${trashed} moved to the Drive trash (restorable for 30 days), ${refused} refused and left untouched. Nothing is permanently deleted by this server.`
+    : `Preview only: ${wouldTrash} would be trashed, ${refused} would be refused. Nothing was trashed. Repeat with confirm: true.`;
+  return { rows, trashed, wouldTrash, refused, note };
+}
+
+// --- drive_move_files: batch form of drive_move_file ---
+
+export const MOVE_BATCH_MAX = 100;
+
+export type MoveBatchRow =
+  | { fileId: string; folderId?: string; name?: string; status: "moved"; file: FileProjection; previousParents: string[]; previousName: string }
+  | { fileId: string; folderId?: string; name?: string; status: "refused"; error: string };
+
+// Same shape as the trash batch: each row runs the full single-file path
+// (input check, name check, source lookup, target lookup, collision check,
+// one files.update), rows go in order, and a refused row is reported and
+// skipped rather than stopping the rest. Two rows with the same fileId are
+// refused up front, before any network call, because the second would act
+// on the result of the first.
+export function assertMoveBatchInput(items: { fileId: string; folderId?: string; name?: string }[], outcome: string): void {
+  if (items.length === 0) {
+    throw new Error(`items is empty. ${outcome}`);
+  }
+  if (items.length > MOVE_BATCH_MAX) {
+    throw new Error(`items has ${items.length} rows; the cap is ${MOVE_BATCH_MAX} per call. Split the list. ${outcome}`);
+  }
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (seen.has(item.fileId)) {
+      throw new Error(`fileId ${item.fileId} appears more than once in items. ${outcome}`);
+    }
+    seen.add(item.fileId);
+  }
+}
+
+async function moveFiles(
+  drive: drive_v3.Drive,
+  items: { fileId: string; folderId?: string; name?: string }[],
+): Promise<{ rows: MoveBatchRow[]; moved: number; refused: number; note: string }> {
+  const rows: MoveBatchRow[] = [];
+  for (const item of items) {
+    try {
+      assertMoveInput(item);
+      if (item.name !== undefined) {
+        assertDriveName(item.name);
+      }
+      const result = await moveFile(drive, item);
+      rows.push({ ...item, status: "moved", ...result });
+    } catch (error) {
+      rows.push({ ...item, status: "refused", error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  const moved = rows.filter((row) => row.status === "moved").length;
+  return {
+    rows,
+    moved,
+    refused: rows.length - moved,
+    note: `${moved} moved or renamed, ${rows.length - moved} refused and left where they were.`,
+  };
+}
+
+// --- drive_create_spreadsheet ---
+//
+// A new Google Sheet, created directly in the target folder (files.create
+// with the Sheet mime type, so it lands on a shared drive with the right
+// owner), then filled in place through the Sheets API. The tool exists so a
+// session can hand the user a ready-made sheet (a payroll list, a plan) without
+// a binary upload and without ever editing a sheet that already exists:
+// it refuses a same-named file in the folder and never touches another id.
+
+export const SPREADSHEET_MAX_SHEETS = 20;
+export const SPREADSHEET_MAX_CELLS = 20000;
+const SPREADSHEET_MAX_CELL_CHARS = 50000;
+const SHEET_TITLE_FORBIDDEN = /[\[\]*?/\\:]/;
+
+export type SpreadsheetSheetInput = { title: string; rows: string[][] };
+
+export function assertSpreadsheetInput(
+  input: { name: string; sheets: SpreadsheetSheetInput[] },
+  outcome: string,
+): number {
+  assertDriveName(input.name, outcome);
+  if (input.sheets.length === 0) {
+    throw new Error(`sheets is empty; a spreadsheet needs at least one tab. ${outcome}`);
+  }
+  if (input.sheets.length > SPREADSHEET_MAX_SHEETS) {
+    throw new Error(`sheets has ${input.sheets.length} tabs; the cap is ${SPREADSHEET_MAX_SHEETS}. ${outcome}`);
+  }
+  const titles = new Set<string>();
+  let cells = 0;
+  for (const sheet of input.sheets) {
+    const title = sheet.title.normalize("NFC");
+    if (title.trim().length === 0 || title.length > 100) {
+      throw new Error(`Tab title "${sheet.title}" must be 1–100 characters. ${outcome}`);
+    }
+    if (SHEET_TITLE_FORBIDDEN.test(title)) {
+      throw new Error(`Tab title "${sheet.title}" contains one of [ ] * ? / \\ :, which Sheets does not allow. ${outcome}`);
+    }
+    if (titles.has(title)) {
+      throw new Error(`Tab title "${sheet.title}" appears more than once. ${outcome}`);
+    }
+    titles.add(title);
+    for (const row of sheet.rows) {
+      for (const cell of row) {
+        if (cell.length > SPREADSHEET_MAX_CELL_CHARS) {
+          throw new Error(`A cell on tab "${sheet.title}" is ${cell.length} characters; the cap is ${SPREADSHEET_MAX_CELL_CHARS}. ${outcome}`);
+        }
+        cells += 1;
+      }
+    }
+  }
+  if (cells > SPREADSHEET_MAX_CELLS) {
+    throw new Error(`The sheets carry ${cells} cells; the cap is ${SPREADSHEET_MAX_CELLS} per call. Split the data. ${outcome}`);
+  }
+  return cells;
+}
+
+export type CreateSpreadsheetResult = {
+  file: FileProjection;
+  sheets: SheetTab[];
+  cells: number;
+  valueInput: "USER_ENTERED" | "RAW";
+  note: string;
+};
+
+// Order of operations, and why: the folder is checked and the name collision
+// refused before anything is created; files.create makes the empty Sheet in
+// place; spreadsheets.get reveals the id of the default tab so it can be
+// renamed rather than left behind as an empty "Sheet1"; the remaining tabs
+// are added in one batchUpdate and every tab's rows written in one
+// values.batchUpdate. A failure after files.create leaves an empty or
+// partly filled Sheet behind — its id is in the error so it can be trashed.
+export async function createSpreadsheet(
+  drive: drive_v3.Drive,
+  sheets: sheets_v4.Sheets,
+  input: { name: string; folderId: string; sheets: SpreadsheetSheetInput[]; valueInput: "USER_ENTERED" | "RAW" },
+): Promise<CreateSpreadsheetResult> {
+  const outcome = "Nothing was created.";
+  const cells = assertSpreadsheetInput(input, outcome);
+  await getFolder(drive, input.folderId, outcome);
+  const existing = await findByExactName(drive, input.name, input.folderId);
+  if (existing) {
+    throw new Error(
+      `A file named "${input.name}" already exists in that folder (id ${existing.id}, ${existing.webViewLink}). Pass a different name; this tool never writes into an existing file. ${outcome}`,
+    );
+  }
+
+  const created = await drive.files.create({
+    requestBody: { name: input.name, mimeType: SHEET_MIME, parents: [input.folderId] },
+    fields: FILE_FIELDS,
+    supportsAllDrives: true,
+  });
+  const file = fileProjection(created.data);
+
+  try {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId: file.id, fields: SHEET_TABS_FIELDS });
+    const defaultTab = sheetTabsFromProperties(meta.data.sheets)[0];
+    const requests: sheets_v4.Schema$Request[] = [
+      { updateSheetProperties: { properties: { sheetId: defaultTab.sheetId, title: input.sheets[0].title }, fields: "title" } },
+      ...input.sheets.slice(1).map((sheet, i) => ({ addSheet: { properties: { title: sheet.title, index: i + 1 } } })),
+    ];
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId: file.id, requestBody: { requests } });
+
+    const data = input.sheets
+      .filter((sheet) => sheet.rows.length > 0)
+      .map((sheet) => ({ range: a1SheetRange(sheet.title), majorDimension: "ROWS", values: sheet.rows }));
+    if (data.length > 0) {
+      await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: file.id,
+        requestBody: { valueInputOption: input.valueInput, data },
+      });
+    }
+    const after = await sheets.spreadsheets.get({ spreadsheetId: file.id, fields: SHEET_TABS_FIELDS });
+    return {
+      file,
+      sheets: sheetTabsFromProperties(after.data.sheets),
+      cells,
+      valueInput: input.valueInput,
+      note: `Created ${file.name} (${file.id}) with ${input.sheets.length} tab(s) and ${cells} cells. Nothing else on Drive was changed.`,
+    };
+  } catch (error) {
+    const message = isServiceDisabledError(error) ? describeSheetsApiDisabled() : error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `The Sheet ${file.id} ("${file.name}") was created in the folder but filling it failed: ${message}. It may be empty or partly filled; trash it with drive_trash_file before retrying.`,
+    );
+  }
 }
 
 // --- drive_export_file: readers and orchestration ---
@@ -840,6 +1275,140 @@ export function registerDriveTools(server: McpServer): void {
           }
           const drive = await driveForAccount(account);
           return await moveFile(drive, { fileId, folderId, name });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_move_files",
+    "Batch form of drive_move_file: up to 100 {fileId, folderId?, name?} rows in one call, processed in order, one result row per item with the same checks as the single tool (a name collision in the target folder, a missing target, a trashed source each refuse that row only; the others proceed). Cannot delete, copy, or move to another account.",
+    {
+      ...accountShape,
+      items: z
+        .array(
+          z.object({
+            fileId: z.string().min(1).describe("Drive file id to move or rename."),
+            folderId: z.string().min(1).optional().describe("Destination folder id. Omit to rename without moving."),
+            name: z.string().min(1).optional().describe("New file name. Omit to move without renaming."),
+          }),
+        )
+        .min(1)
+        .max(MOVE_BATCH_MAX)
+        .describe("The rows to move, rename, or both."),
+    },
+    async ({ account, items }) =>
+      safeTool(async () => {
+        return await driveScopeAware(account, "Nothing was changed.", async () => {
+          assertMoveBatchInput(items, "Nothing was changed.");
+          const drive = await driveForAccount(account);
+          return await moveFiles(drive, items);
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_copy_file",
+    "Copy a Google Drive file into a folder on the same account, optionally under a new name. Drive performs the copy on its side, so no bytes pass through this server; a Google Doc or Sheet copies as the same Google type, a PDF or image byte for byte, and a copy from My Drive into a shared drive works. The copy's description records the source file and time, appended to any description the source already had. Refuses when a file with the resulting name already exists in the target folder rather than overwriting it, and refuses a folder as the source. Only copies: it cannot delete, move, rename, share, or overwrite anything, and it never modifies the source.",
+    {
+      ...accountShape,
+      fileId: z.string().min(1).describe("Drive file id to copy. Must be a file, not a folder."),
+      targetFolderId: z.string().min(1).describe("Destination Drive folder id the copy is placed in."),
+      newName: z.string().min(1).optional().describe("Name of the copy. Defaults to the source file's name."),
+    },
+    async ({ account, fileId, targetFolderId, newName }) =>
+      safeTool(async () => {
+        return await driveScopeAware(account, "Nothing was copied.", async () => {
+          if (newName !== undefined) {
+            assertDriveName(newName, "Nothing was copied.");
+          }
+          const drive = await driveForAccount(account);
+          return await copyFile(drive, { fileId, targetFolderId, newName, copiedAt: new Date().toISOString() });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_trash_file",
+    "Move one Google Drive file or folder to the Drive trash (files.update with trashed=true), where Drive keeps it for 30 days and it can be restored. Never a permanent delete: this server has no files.delete and no emptyTrash. Two guards: expectedName must equal the file's current name exactly, so a wrong or stale id is refused; and without confirm: true the call changes nothing and returns the file it would trash. A folder additionally needs confirmFolder: true, because trashing a folder trashes its contents. Refuses a file that is already in the trash.",
+    {
+      ...accountShape,
+      fileId: z.string().min(1).describe("Drive file or folder id to trash."),
+      expectedName: z
+        .string()
+        .min(1)
+        .describe("The file's current name, exactly. Refused when it differs from the name Drive reports for fileId."),
+      confirm: z.boolean().optional().describe("Must be true to trash. Omitted or false: returns what would be trashed and changes nothing."),
+      confirmFolder: z
+        .boolean()
+        .optional()
+        .describe("Required in addition to confirm when fileId is a folder; trashing a folder trashes everything inside it."),
+    },
+    async ({ account, fileId, expectedName, confirm, confirmFolder }) =>
+      safeTool(async () => {
+        return await driveScopeAware(account, "Nothing was trashed.", async () => {
+          const drive = await driveForAccount(account);
+          return await trashFile(drive, { fileId, expectedName, confirm, confirmFolder });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_trash_files",
+    "Batch form of drive_trash_file for an accepted list: up to 100 {fileId, expectedName} items in one call, processed in order, one result row per item; a refused row (name mismatch, already in the trash, not found, no permission) never stops the others. Same guards as the single tool: expectedName must equal each file's current name, confirm: true is required to trash and without it the call only previews, and a folder needs confirmFolder: true. Trash only, restorable for 30 days; no permanent delete exists in this server.",
+    {
+      ...accountShape,
+      items: z
+        .array(
+          z.object({
+            fileId: z.string().min(1).describe("Drive file or folder id to trash."),
+            expectedName: z.string().min(1).describe("The file's current name, exactly."),
+          }),
+        )
+        .min(1)
+        .max(TRASH_BATCH_MAX)
+        .describe("The rows to trash, each with its id and its exact current name."),
+      confirm: z.boolean().optional().describe("Must be true to trash. Omitted or false: previews every row and changes nothing."),
+      confirmFolder: z
+        .boolean()
+        .optional()
+        .describe("Required in addition to confirm for rows that are folders; a folder row without it is refused, the others proceed."),
+    },
+    async ({ account, items, confirm, confirmFolder }) =>
+      safeTool(async () => {
+        return await driveScopeAware(account, "Nothing was trashed.", async () => {
+          assertTrashBatchInput(items, "Nothing was trashed.");
+          const drive = await driveForAccount(account);
+          return await trashFiles(drive, { items, confirm, confirmFolder });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "drive_create_spreadsheet",
+    "Create a new Google Sheet in a Drive folder (My Drive or a shared drive) and fill its tabs in one call: name, folderId, and sheets as [{title, rows: string[][]}], up to 20 tabs and 20 000 cells. Refuses when a file with that name already exists in the folder; never writes into an existing spreadsheet, never shares. Values are written as USER_ENTERED by default (numbers and dates are parsed as a person typing them would get); pass valueInput: \"RAW\" to store every cell as literal text.",
+    {
+      ...accountShape,
+      name: z.string().min(1).describe("Spreadsheet name."),
+      folderId: z.string().min(1).describe("Target folder id (My Drive or a shared drive)."),
+      sheets: z
+        .array(
+          z.object({
+            title: z.string().min(1).describe("Tab title, 1–100 characters, none of [ ] * ? / \\ :"),
+            rows: z.array(z.array(z.string())).describe("Rows of cells, as strings; an empty array makes an empty tab."),
+          }),
+        )
+        .min(1)
+        .max(SPREADSHEET_MAX_SHEETS)
+        .describe("Tabs in order; the first replaces the default tab."),
+      valueInput: z.enum(["USER_ENTERED", "RAW"]).optional().describe("How cell text is interpreted. Default USER_ENTERED."),
+    },
+    async ({ account, name, folderId, sheets, valueInput }) =>
+      safeTool(async () => {
+        assertSpreadsheetInput({ name, sheets }, "Nothing was created.");
+        return await driveScopeAware(account, "Nothing was created.", async () => {
+          const drive = await driveForAccount(account);
+          const sheetsClient = await sheetsForAccount(account);
+          return await createSpreadsheet(drive, sheetsClient, { name, folderId, sheets, valueInput: valueInput ?? "USER_ENTERED" });
         });
       }, account),
   );

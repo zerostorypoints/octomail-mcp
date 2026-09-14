@@ -47,15 +47,19 @@ destructive actions available are deleting a label or a filter, which also
 require an explicit `confirm: true` — without it they return an impact report
 and change nothing. Deleting a label does not delete the messages that
 carried it, only their categorisation. The Drive tools can create folders,
-upload a Gmail attachment, and move or rename a file; nothing on Drive is
-ever deleted, trashed, or shared, and the only bytes a Drive tool ever
-uploads are a Gmail attachment already on the same account. One Drive tool
+upload a Gmail attachment, move or rename a file, copy a file into a
+folder on the same account, and move a file to the Drive trash; nothing on
+Drive is ever permanently deleted or shared, the trash step needs the file's
+exact current name and `confirm: true` (a folder also `confirmFolder: true`),
+and the only bytes a Drive tool ever uploads are a Gmail attachment
+already on the same account (a copy is made by Drive itself, with no bytes
+passing through this server). One Drive tool
 reads content: `drive_export_file` returns the text of a Google Sheet (one
 tab, as CSV) or a Google Doc (as plain text), capped at 200 KB in the
 result, and writes a larger export into the account's download directory
 under a fresh name instead of overwriting anything. It never downloads a
 binary file — a PDF, an image, or an uploaded spreadsheet is refused. A
-file already named that in the target folder makes the upload or move
+file already named that in the target folder makes the upload, move, or copy
 refuse rather than overwrite it. OAuth tokens are stored locally at
 file mode `0600`. See [SECURITY.md](SECURITY.md) for the full policy and how
 to report a vulnerability.
@@ -141,6 +145,11 @@ spam, and deletion actions unless the call carries an explicit
 - `drive_create_folder(account, name, parentId?)` — creates a folder, or if one of that name already exists directly under the given parent, returns it instead with `created: false` and creates nothing.
 - `drive_save_attachment(account, messageId, attachmentId, folderId, name?)` — saves a Gmail attachment straight into a Drive folder; the bytes go directly from Gmail to Drive, never through local disk. `folderId` is required, and the new file's description records the source account, message id, subject, sender, and date. Refuses, naming the existing file's id, when a file with the target name already exists in that folder, rather than overwriting it.
 - `drive_move_file(account, fileId, folderId?, name?)` — moves a Drive file to a different folder, renames it, or both in one call, removing it from every previous parent. Refuses when a file with the resulting name already exists in the target folder. Cannot copy the file or move it to a different account.
+- `drive_move_files(account, items[{fileId, folderId?, name?}])` — the batch form of `drive_move_file`: up to 100 rows in one call, in order, one result row per item (`moved` with the previous parents and name, or `refused` with the reason); a refused row never stops the others. Same checks as the single tool.
+- `drive_copy_file(account, fileId, targetFolderId, newName?)` — copies a Drive file into a folder on the same account, under `newName` or the source's own name. A Google Doc or Sheet copies as the same Google type, a binary file byte for byte, and a copy from My Drive into a shared drive works; Drive performs the copy, so no bytes pass through this server. The copy's description records the source file id, name, and time, appended to any description the source already carried. Refuses, naming the existing file's id, when a file with the resulting name already exists in the target folder, and refuses a folder as the source. Never modifies the source and cannot delete, move, or overwrite anything.
+- `drive_trash_file(account, fileId, expectedName, confirm?, confirmFolder?)` — moves one Drive file or folder to the Drive trash (`files.update` with `trashed=true`), where Drive keeps it for 30 days and it can be restored; never a permanent delete, there is no `files.delete` and no `emptyTrash` in this server. `expectedName` must equal the file's current name (compared after Unicode NFC normalisation, so a macOS-uploaded name with decomposed accents still matches), so a wrong or stale id is refused. The result carries the file's `owners`; when Drive refuses the trash because this account is not the owner, the refusal names the owner. Without `confirm: true` it changes nothing and returns the file it would trash; a folder additionally needs `confirmFolder: true`, because trashing a folder trashes its contents. Refuses a file already in the trash.
+- `drive_trash_files(account, items[{fileId, expectedName}], confirm?, confirmFolder?)` — the batch form of `drive_trash_file` for an accepted list: up to 100 rows in one call, processed in order, one result row per item with `trashed`, `wouldTrash` or `refused` and the reason; a refused row never stops the others. Same guards, same trash-only outcome.
+- `drive_create_spreadsheet(account, name, folderId, sheets[{title, rows}], valueInput?)` — creates a new Google Sheet in a folder (My Drive or a shared drive) and fills its tabs in one call: up to 20 tabs and 20 000 cells, the first tab replacing the default one. Refuses a same-named file in the folder and never writes into an existing spreadsheet. `valueInput` is `USER_ENTERED` by default (numbers and dates parsed as when typed) or `RAW` (every cell literal text). Uses the Sheets API under the existing `drive` scope. If filling fails after the file was created, the error names the new id so it can be trashed.
 - `drive_export_file(account, fileId, sheet?)` — reads a Google Sheet as CSV (one tab; `sheet` picks it by title, default the first) or a Google Doc as plain text. Google-native documents only: any other mime type is refused before any content request. The result's `text` is capped at 200 KB, cut on a line boundary; when cut, `truncated: true` and the full text is written into `OCTOMAIL_DOWNLOAD_DIR/<account>` with the path in `savedTo`, never overwriting an existing file. Sheets are read through the Google Sheets API under the existing `drive` scope, so that API must be enabled on the Cloud project.
 
 ## Documentation
@@ -152,6 +161,7 @@ spam, and deletion actions unless the call carries an explicit
 | [docs/clients.md](docs/clients.md) | Wiring the server into Claude Code, Claude Desktop, and Codex |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Fixes for common authorization and config errors |
 | [docs/filter-playbook.md](docs/filter-playbook.md) | Field-tested workflow and lessons for cleaning up a mailbox with filters, backfills, and verification |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | The no-real-user-data rule for code, tests and docs, and the 2026-09-14 history rewrite |
 
 ## Commands
 

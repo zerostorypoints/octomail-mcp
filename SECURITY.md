@@ -37,15 +37,15 @@ Beyond those four tools, `calendar.events` also covers a planned busy-block sync
 between calendars, which still has no tool; a granted scope does nothing by itself,
 only a registered tool that calls it can act.
 
-The five Drive tools can list folders and files, create a folder, upload a Gmail
-attachment into a folder, move or rename a file, and read a Google Sheet or Doc as
-text. No Drive tool deletes, trashes, or shares. One, `drive_export_file`, reads
+The nine Drive tools can list folders and files, create a folder, upload a Gmail
+attachment into a folder, move or rename a file, copy a file into a folder on the
+same account, read a Google Sheet or Doc as text, create a new Google Sheet with given rows (`drive_create_spreadsheet`, never into an existing file), and move a file to the Drive trash (`drive_trash_file` and its batch form `drive_trash_files`, guarded by the file's exact name and `confirm: true`, restorable for 30 days). No Drive tool permanently deletes or shares. One, `drive_export_file`, reads
 content, and only the rendered text of a Google Sheet or Google Doc: it refuses every
 other mime type before any content request, so no binary file on Drive can be pulled
 through this server. Its result is capped at 200 KB; a larger export is written into
-the account's download directory under a fresh name. `drive_save_attachment` and `drive_move_file` each
+the account's download directory under a fresh name. `drive_save_attachment`, `drive_move_file` and `drive_copy_file` each
 refuse rather than overwrite when a file of the target name already exists in the
-destination folder. The restriction above is the tool surface, not the token: the
+destination folder; `drive_copy_file` never touches its source. The restriction above is the tool surface, not the token: the
 granted scope is full `drive`, which permits delete, trash, share, and read of every
 file on that account's Drive, so anything holding the token file can do all four,
 regardless of what this server's tool surface offers.
