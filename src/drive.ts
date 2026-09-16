@@ -385,7 +385,7 @@ function isNotFoundError(error: unknown): boolean {
 // 404/trashed handling both callers need without duplicating it. The outcome
 // phrase and noun ("Folder" / "File") come from the caller so the refusal
 // reads the way that tool promises — "Nothing was changed." for
-// create/move, "Nothing was uploaded." for a future upload tool.
+// create/move, "Nothing was uploaded." for the upload tools.
 const CHECK_FIELDS = "id,name,mimeType,parents,trashed";
 
 async function getDriveFileForCheck(
@@ -457,8 +457,29 @@ export async function getFileForCopy(
   return result;
 }
 
-const FILE_FIELDS = "id,name,mimeType,size,modifiedTime,parents,webViewLink,md5Checksum";
+export const FILE_FIELDS = "id,name,mimeType,size,modifiedTime,parents,webViewLink,md5Checksum";
 const LIST_FIELDS = `nextPageToken, incompleteSearch, files(${FILE_FIELDS})`;
+
+export const GOOGLE_NATIVE_MIME_PREFIX = "application/vnd.google-apps.";
+
+// The source of a download: a file with bytes of its own. The full file
+// fields come back so the caller can check the download against Drive's size
+// and md5. A folder, and every other Google-native type (Doc, Sheet, Slides,
+// shortcut), is refused before any content request — drive_export_file is
+// the tool for the two of those that have a text form, the mirror of how it
+// refuses a binary file.
+export async function getFileForDownload(drive: drive_v3.Drive, fileId: string, outcome: string): Promise<FileProjection> {
+  const file = fileProjection(await getDriveFileForCheck(drive, fileId, outcome, "File", `${FILE_FIELDS},trashed`));
+  if (file.isFolder) {
+    throw new Error(`File ${file.id} ("${file.name}") is a folder. drive_download_file downloads files only, not folders. ${outcome}`);
+  }
+  if (file.mimeType.startsWith(GOOGLE_NATIVE_MIME_PREFIX)) {
+    throw new Error(
+      `File ${file.id} ("${file.name}") is ${file.mimeType}, a Google-native document with no bytes of its own to download. Read a Google Sheet or Google Doc with drive_export_file instead. ${outcome}`,
+    );
+  }
+  return file;
+}
 
 // Shared with Tasks 5 and 6 (move/rename) to check for a name collision
 // before writing. pageSize: 2 is enough to distinguish "one match" from "more
@@ -1141,7 +1162,7 @@ export async function exportFile(deps: ExportDeps, input: { fileId: string; shee
   const kind = exportKindForMime(file.mimeType);
   if (kind === undefined) {
     throw new Error(
-      `File ${file.id} is ${file.mimeType}, not a Google Sheet or Google Doc. drive_export_file reads only Google-native documents and never downloads a binary file. ${outcome}`,
+      `File ${file.id} is ${file.mimeType}, not a Google Sheet or Google Doc. drive_export_file reads only Google-native documents and never downloads a binary file; use drive_download_file to save this one to the download directory. ${outcome}`,
     );
   }
   if (kind === "doc" && input.sheet !== undefined) {
@@ -1232,7 +1253,7 @@ export function registerDriveTools(server: McpServer): void {
 
   server.tool(
     "drive_save_attachment",
-    "Save a Gmail attachment straight into a Google Drive folder — the bytes go directly from Gmail to Drive, never through local disk and never back in the tool result. Refuses when a file with the target name already exists in that folder rather than overwriting it. Cannot delete anything, and cannot upload a local file: only an attachment already on a Gmail message.",
+    "Save a Gmail attachment straight into a Google Drive folder — the bytes go directly from Gmail to Drive, never through local disk and never back in the tool result. Refuses when a file with the target name already exists in that folder rather than overwriting it. Cannot delete anything, and uploads only an attachment already on a Gmail message; a local file goes up with drive_upload_file.",
     {
       ...accountShape,
       messageId: z.string().min(1).describe("Gmail message id the attachment is on."),

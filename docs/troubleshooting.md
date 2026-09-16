@@ -56,6 +56,19 @@ If you are a Google Workspace admin and the consent screen refuses the scope for
 your domain, allow the OAuth client under **Admin console > Security > Access and
 data control > API controls > Manage third-party app access**.
 
+## `resolves outside this account's download directory` or `over the 5242880-byte limit`
+
+`drive_upload_file` reads only from the account's own download directory,
+`OCTOMAIL_DOWNLOAD_DIR/<account>` (default `~/.octomail/attachments/<account>`),
+and `drive_download_file` writes only there. Copy the file into that directory
+and pass its name, or a path relative to it; an absolute path elsewhere, a
+`..` path, a symlink pointing out, or a file in another account's directory is
+refused, and nothing is sent to Drive.
+
+An upload is also refused above 5 MB: the Google client library sends a file in
+a single request, which Drive caps at that size, and this server has no
+resumable upload. For a larger file, upload it in the Drive web interface.
+
 ## "Google did not return a refresh token"
 
 **Cause:** This Gmail account was already authorized once before, and Google

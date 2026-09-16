@@ -1390,6 +1390,7 @@ test("drive_export_file refuses a PDF before any content request", async () => {
     const result = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "pdf1" });
 
     assert.match(result.error as string, /application\/pdf, not a Google Sheet or Google Doc/);
+    assert.match(result.error as string, /drive_download_file/);
     assert.match(result.error as string, /Nothing was changed\.$/);
     assert.equal(sheetsCalls(calls).length, 0);
     assert.ok(calls.every((call) => !call.pathname.endsWith("/export")));
