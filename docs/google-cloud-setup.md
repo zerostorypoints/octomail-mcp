@@ -94,7 +94,7 @@ You have three options, in order of convenience:
 | `gmail.settings.basic` | List, create, and delete filters |
 | `calendar.readonly` | List calendars and events |
 | `calendar.events` | Requested for a planned future feature (busy-block sync between calendars); no registered tool uses it yet |
-| `drive` | List folders and files, create folders, upload a Gmail attachment, move or rename, read a Google Sheet or Doc as text (the Sheets API accepts this scope); full scope because `drive.file` cannot see folders the app did not create |
+| `drive` | List folders and files, create folders, upload a Gmail attachment or a local file, download a file, move or rename, read a Google Sheet or Doc as text (the Sheets API accepts this scope); full scope because `drive.file` cannot see folders the app did not create |
 
 Adding a scope to this list means every already-authorized account is
 missing it until it re-runs `npm run auth -- --account <alias>` and approves

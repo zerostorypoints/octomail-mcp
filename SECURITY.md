@@ -37,13 +37,18 @@ Beyond those four tools, `calendar.events` also covers a planned busy-block sync
 between calendars, which still has no tool; a granted scope does nothing by itself,
 only a registered tool that calls it can act.
 
-The nine Drive tools can list folders and files, create a folder, upload a Gmail
-attachment into a folder, move or rename a file, copy a file into a folder on the
-same account, read a Google Sheet or Doc as text, create a new Google Sheet with given rows (`drive_create_spreadsheet`, never into an existing file), and move a file to the Drive trash (`drive_trash_file` and its batch form `drive_trash_files`, guarded by the file's exact name and `confirm: true`, restorable for 30 days). No Drive tool permanently deletes or shares. One, `drive_export_file`, reads
-content, and only the rendered text of a Google Sheet or Google Doc: it refuses every
-other mime type before any content request, so no binary file on Drive can be pulled
-through this server. Its result is capped at 200 KB; a larger export is written into
-the account's download directory under a fresh name. `drive_save_attachment`, `drive_move_file` and `drive_copy_file` each
+The eleven Drive tools can list folders and files, create a folder, upload a Gmail
+attachment into a folder, upload a local file into a folder, download a file, move or rename a file, copy a file into a folder on the
+same account, read a Google Sheet or Doc as text, create a new Google Sheet with given rows (`drive_create_spreadsheet`, never into an existing file), and move a file to the Drive trash (`drive_trash_file` and its batch form `drive_trash_files`, guarded by the file's exact name and `confirm: true`, restorable for 30 days). No Drive tool permanently deletes or shares. Two read
+content. `drive_export_file` returns only the rendered text of a Google Sheet or Google Doc and refuses every
+other mime type before any content request. Its result is capped at 200 KB; a larger export is written into
+the account's download directory under a fresh name. `drive_download_file` takes the other files — a PDF, a .docx, an image — and
+writes them into the account's download directory (or a subdirectory of it), never into the tool result; it refuses
+Google-native files, refuses a file over its size cap (100 MB unless raised) before fetching, checks the size and md5 against
+Drive's metadata before writing, and refuses rather than overwrite an existing local file. `drive_upload_file` is the
+only tool that sends local bytes to Drive, and only from a file inside that same per-account directory: a path resolving
+outside it, by `..`, an absolute path or a symlink, is refused, so neither tool reads or writes another account's directory
+or anything else on disk. `drive_save_attachment`, `drive_upload_file`, `drive_move_file` and `drive_copy_file` each
 refuse rather than overwrite when a file of the target name already exists in the
 destination folder; `drive_copy_file` never touches its source. The restriction above is the tool surface, not the token: the
 granted scope is full `drive`, which permits delete, trash, share, and read of every

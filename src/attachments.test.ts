@@ -83,6 +83,24 @@ test("resolveAttachmentPath accepts a file inside the root", () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test("resolveAttachmentPath accepts an absolute path inside a root reached through a symlink", () => {
+  const realBase = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-real-"));
+  const linkBase = `${realBase}-link`;
+  fs.symlinkSync(realBase, linkBase);
+  try {
+    const root = path.join(linkBase, "work");
+    fs.mkdirSync(root);
+    fs.writeFileSync(path.join(root, "faktura.pdf"), "x");
+    assert.equal(
+      resolveAttachmentPath(path.join(root, "faktura.pdf"), root),
+      fs.realpathSync(path.join(root, "faktura.pdf")),
+    );
+  } finally {
+    fs.rmSync(linkBase, { force: true });
+    fs.rmSync(realBase, { recursive: true, force: true });
+  }
+});
+
 test("resolveAttachmentPath rejects a traversal path", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "octomail-root-"));
   assert.throws(() => resolveAttachmentPath("../../etc/hosts", root), /outside the download root/);

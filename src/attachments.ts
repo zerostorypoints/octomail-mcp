@@ -217,7 +217,7 @@ export const attachmentSpecSchema = z.union([
   z
     .object({ path: z.string().min(1) })
     .describe(
-      "A file inside this account's own download directory (OCTOMAIL_DOWNLOAD_DIR/<account>) — the same directory gmail_get_attachment writes into for this account, and not any other configured account's. Relative paths resolve against that directory.",
+      "A file inside this account's own download directory (OCTOMAIL_DOWNLOAD_DIR/<account>) — the same directory gmail_get_attachment and drive_download_file write into for this account, and not any other configured account's. Relative paths resolve against that directory.",
     ),
   z
     .object({ messageId: z.string().min(1), attachmentId: z.string().min(1) })
@@ -240,13 +240,57 @@ export type AttachmentSpec = z.infer<typeof attachmentSpecSchema>;
 // symlink that sits inside the root but points outside it — a case the
 // lexical check alone cannot see, since the symlink's own path is inside
 // the root right up until it's dereferenced.
-function assertWithinRoot(candidate: string, realRoot: string, inputPath: string): void {
-  const relative = path.relative(realRoot, candidate);
-  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error(
-      `Attachment path "${inputPath}" resolves outside the download root ${realRoot}. Outbound file attachments must live inside that account's own download directory. Nothing was created.`,
-    );
+//
+// The lexical check accepts a path inside the root as configured as well as
+// inside its real path: an absolute path the caller built from a root that
+// runs through a symlink (on macOS the temp directory lives under /var, a
+// link to /private/var) is inside the root, and the realpath check that
+// follows is the one that decides.
+export function isWithinRoot(candidate: string, root: string, allowRoot = false): boolean {
+  const relative = path.relative(root, candidate);
+  if (relative === "") {
+    return allowRoot;
   }
+  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+export type RootedPathMessages = {
+  outside: (inputPath: string, realRoot: string) => string;
+  missing: (inputPath: string, realRoot: string) => string;
+};
+
+const ATTACHMENT_PATH_MESSAGES: RootedPathMessages = {
+  outside: (inputPath, realRoot) =>
+    `Attachment path "${inputPath}" resolves outside the download root ${realRoot}. Outbound file attachments must live inside that account's own download directory. Nothing was created.`,
+  missing: (inputPath, realRoot) => `Attachment path "${inputPath}" does not exist inside the download root ${realRoot}.`,
+};
+
+// Shared by outbound draft attachments and drive_upload_file; the messages
+// come from the caller so each refusal names what that tool promises.
+export function resolveFileWithinRoot(
+  inputPath: string,
+  root: string,
+  messages: RootedPathMessages,
+  realpathSync: (candidate: string) => string = fs.realpathSync,
+): string {
+  const realRoot = realpathSync(root);
+  const resolved = path.resolve(realRoot, inputPath);
+  if (!isWithinRoot(resolved, realRoot) && !isWithinRoot(resolved, path.resolve(root))) {
+    throw new Error(messages.outside(inputPath, realRoot));
+  }
+
+  let realTarget: string;
+  try {
+    realTarget = realpathSync(resolved);
+  } catch {
+    throw new Error(messages.missing(inputPath, realRoot));
+  }
+
+  if (!isWithinRoot(realTarget, realRoot)) {
+    throw new Error(messages.outside(inputPath, realRoot));
+  }
+
+  return realTarget;
 }
 
 export function resolveAttachmentPath(
@@ -254,22 +298,7 @@ export function resolveAttachmentPath(
   root: string,
   realpathSync: (candidate: string) => string = fs.realpathSync,
 ): string {
-  const realRoot = realpathSync(root);
-  const resolved = path.resolve(realRoot, inputPath);
-  assertWithinRoot(resolved, realRoot, inputPath);
-
-  let realTarget: string;
-  try {
-    realTarget = realpathSync(resolved);
-  } catch {
-    throw new Error(
-      `Attachment path "${inputPath}" does not exist inside the download root ${realRoot}.`,
-    );
-  }
-
-  assertWithinRoot(realTarget, realRoot, inputPath);
-
-  return realTarget;
+  return resolveFileWithinRoot(inputPath, root, ATTACHMENT_PATH_MESSAGES, realpathSync);
 }
 
 export async function loadOutboundAttachments(
