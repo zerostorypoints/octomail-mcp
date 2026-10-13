@@ -27,6 +27,7 @@ import {
   isServiceDisabledError,
   missingDriveScope,
   nameContainsQuery,
+  parseA1Range,
   pickSheet,
   provenanceDescription,
   registerDriveTools,
@@ -2789,6 +2790,239 @@ test("sheet_append_rows adds a notice when Sheets put the rows somewhere else", 
     assert.equal(result.updatedRange, "'Arkusz1'!B9:D9");
     assert.match(result.notice as string, /expected to start at A3/);
     assert.match(result.notice as string, /B9/);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+// --- parseA1Range ---
+
+test("parseA1Range reads a single cell and a rectangle, 1-based", () => {
+  assert.deepEqual(parseA1Range("B2", "x"), { startRow: 2, startColumn: 2, endRow: 2, endColumn: 2, rows: 1, columns: 1 });
+  assert.deepEqual(parseA1Range("A1:AA3", "x"), { startRow: 1, startColumn: 1, endRow: 3, endColumn: 27, rows: 3, columns: 27 });
+});
+
+test("parseA1Range refuses a tab name, an open range, a reversed range and lowercase", () => {
+  assert.throws(() => parseA1Range("Arkusz1!B2", "Nothing was changed."), /without a tab name.*Nothing was changed\.$/);
+  assert.throws(() => parseA1Range("A:A", "x"), /bounded A1 range/);
+  assert.throws(() => parseA1Range("B2:C", "x"), /bounded A1 range/);
+  assert.throws(() => parseA1Range("b2", "x"), /bounded A1 range/);
+  assert.throws(() => parseA1Range("C3:B2", "x"), /ends before it starts/);
+});
+
+// --- end-to-end: sheet_update_cells ---
+//
+// "Arkusz1" holds 2 rows x 3 columns; C2 is empty, which Sheets reports by
+// dropping it from the row.
+
+function updatePath(range: string): string {
+  return `/v4/spreadsheets/sheet1/values/'Arkusz1'!${range}`;
+}
+
+function updateRoutes(options: { formulas?: unknown[][]; after?: unknown[][] } = {}): FakeRoute[] {
+  return [
+    { method: "GET", test: (p) => p === "/drive/v3/files/sheet1", respond: () => SHEET_FILE },
+    { method: "GET", host: SHEETS_HOST, test: (p) => p === "/v4/spreadsheets/sheet1", respond: () => SHEET_META },
+    {
+      method: "GET",
+      host: SHEETS_HOST,
+      test: (p) => decodeURIComponent(p).startsWith("/v4/spreadsheets/sheet1/values/"),
+      respond: (url) => (url.searchParams.get("valueRenderOption") === "FORMULA" ? { values: options.formulas ?? [] } : SHEET_VALUES),
+    },
+    {
+      method: "PUT",
+      host: SHEETS_HOST,
+      test: (p) => decodeURIComponent(p).startsWith("/v4/spreadsheets/sheet1/values/"),
+      respond: () => ({ updatedCells: 1, updatedData: { values: options.after ?? [["Maria"]] } }),
+    },
+  ];
+}
+
+const UPDATE_B2 = { account: ACCOUNT, fileId: "sheet1", sheet: "Arkusz1", range: "B2", values: [["Maria"]], expectedValues: [["Anna"]] };
+
+test("sheet_update_cells refuses a bad range, an oversized range and mismatched dimensions before any network call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(updateRoutes());
+    const call = (args: Record<string, unknown>) => callTool(handlers, "sheet_update_cells", { ...UPDATE_B2, confirm: true, ...args });
+
+    assert.match((await call({ range: "Arkusz1!B2" })).error as string, /without a tab name/);
+    assert.match((await call({ range: "A1:Z2" })).error as string, /52 cells; the cap is 50/);
+    assert.match((await call({ range: "A1:B2" })).error as string, /values must be 2 row\(s\) x 2 column\(s\) to match A1:B2/);
+    assert.match(
+      (await call({ range: "A1:B1", values: [["a", "b"]], expectedValues: [["a"]] })).error as string,
+      /expectedValues must be 1 row\(s\) x 2 column\(s\)/,
+    );
+    assert.equal(calls.length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_update_cells refuses a PDF without a Sheets call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([{ method: "GET", test: (p) => p === "/drive/v3/files/pdf1", respond: () => PDF_FILE }]);
+
+    const result = await callTool(handlers, "sheet_update_cells", { ...UPDATE_B2, fileId: "pdf1", confirm: true });
+
+    assert.match(result.error as string, /application\/pdf, not a Google Sheet/);
+    assert.equal(sheetsCalls(calls).length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_update_cells refuses a range past the tab's data and points at sheet_append_rows", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(updateRoutes());
+
+    const below = await callTool(handlers, "sheet_update_cells", { ...UPDATE_B2, range: "B3", expectedValues: [[""]], confirm: true });
+    assert.match(below.error as string, /B3 reaches past the data on tab "Arkusz1" \(A1:C2\)/);
+    assert.match(below.error as string, /sheet_append_rows/);
+    const right = await callTool(handlers, "sheet_update_cells", { ...UPDATE_B2, range: "D1", expectedValues: [[""]], confirm: true });
+    assert.match(right.error as string, /reaches past the data/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_update_cells without confirm returns a preview and writes nothing", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(updateRoutes({ formulas: [["Anna"]] }));
+
+    const result = await callTool(handlers, "sheet_update_cells", UPDATE_B2);
+
+    assert.equal(result.error, undefined);
+    assert.equal(result.preview, true);
+    assert.equal(result.range, "B2");
+    assert.deepEqual(result.before, [["Anna"]]);
+    assert.deepEqual(result.after, [["Maria"]]);
+    assert.equal(result.expectedMatches, true);
+    assert.deepEqual(result.mismatches, []);
+    assert.deepEqual(result.formulasBefore, []);
+    assert.equal(result.needsConfirmFormulas, false);
+    assert.match(result.note as string, /Nothing was changed\. Repeat the call with confirm: true/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_update_cells preview reports a mismatch and pads the dropped empty cell", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(updateRoutes({ formulas: [["Anna"]] }));
+
+    const result = await callTool(handlers, "sheet_update_cells", {
+      ...UPDATE_B2,
+      range: "B2:C2",
+      values: [["Maria", "2026-01-01"]],
+      expectedValues: [["Ania", ""]],
+    });
+
+    assert.deepEqual(result.before, [["Anna", ""]]);
+    assert.equal(result.expectedMatches, false);
+    assert.deepEqual(result.mismatches, [{ cell: "B2", expected: "Ania", actual: "Anna" }]);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_update_cells with confirm refuses when expectedValues differs from the sheet", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(updateRoutes({ formulas: [["Anna"]] }));
+
+    const result = await callTool(handlers, "sheet_update_cells", { ...UPDATE_B2, expectedValues: [["Ania"]], confirm: true });
+
+    assert.match(result.error as string, /B2: expected "Ania", found "Anna"/);
+    assert.match(result.error as string, /Nothing was changed\.$/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_update_cells needs confirmFormulas to overwrite a formula", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(updateRoutes({ formulas: [["=PROPER(A2)"]] }));
+
+    const preview = await callTool(handlers, "sheet_update_cells", UPDATE_B2);
+    assert.deepEqual(preview.formulasBefore, [{ cell: "B2", formula: "=PROPER(A2)" }]);
+    assert.equal(preview.needsConfirmFormulas, true);
+
+    const refused = await callTool(handlers, "sheet_update_cells", { ...UPDATE_B2, confirm: true });
+    assert.match(refused.error as string, /B2 \(=PROPER\(A2\)\)/);
+    assert.match(refused.error as string, /confirmFormulas: true/);
+    assertNoWrite(calls);
+
+    const done = await callTool(handlers, "sheet_update_cells", { ...UPDATE_B2, confirm: true, confirmFormulas: true });
+    assert.equal(done.error, undefined);
+    assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_update_cells does not ask for confirmFormulas when the formula is written back unchanged", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    installFakeNetwork(updateRoutes({ formulas: [["=PROPER(A2)"]], after: [["Anna"]] }));
+
+    const result = await callTool(handlers, "sheet_update_cells", { ...UPDATE_B2, values: [["=PROPER(A2)"]], confirm: true });
+
+    assert.equal(result.error, undefined);
+    assert.equal(result.changedCells, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_update_cells with confirm writes the range and returns before and after", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(updateRoutes({ formulas: [["Anna"]] }));
+
+    const result = await callTool(handlers, "sheet_update_cells", { ...UPDATE_B2, confirm: true });
+
+    assert.equal(result.error, undefined);
+    assert.equal(result.preview, undefined);
+    assert.equal(result.range, "B2");
+    assert.equal(result.sheet.title, "Arkusz1");
+    assert.equal(result.updatedCells, 1);
+    assert.equal(result.changedCells, 1);
+    assert.deepEqual(result.before, [["Anna"]]);
+    assert.deepEqual(result.after, [["Maria"]]);
+
+    const writes = calls.filter((call) => call.method !== "GET");
+    assert.equal(writes.length, 1);
+    assert.equal(decodeURIComponent(writes[0].pathname), updatePath("B2"));
+    assert.equal(writes[0].url.searchParams.get("valueInputOption"), "USER_ENTERED");
+    assert.deepEqual(JSON.parse(writes[0].body as string).values, [["Maria"]]);
   } finally {
     teardownAccountFixture();
   }
