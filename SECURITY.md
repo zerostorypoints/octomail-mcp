@@ -39,7 +39,11 @@ only a registered tool that calls it can act.
 
 The eleven Drive tools can list folders and files, create a folder, upload a Gmail
 attachment into a folder, upload a local file into a folder, download a file, move or rename a file, copy a file into a folder on the
-same account, read a Google Sheet or Doc as text, create a new Google Sheet with given rows (`drive_create_spreadsheet`, never into an existing file), and move a file to the Drive trash (`drive_trash_file` and its batch form `drive_trash_files`, guarded by the file's exact name and `confirm: true`, restorable for 30 days). No Drive tool permanently deletes or shares. Two read
+same account, read a Google Sheet or Doc as text, create a new Google Sheet with given rows (`drive_create_spreadsheet`, never into an existing file), and move a file to the Drive trash (`drive_trash_file` and its batch form `drive_trash_files`, guarded by the file's exact name and `confirm: true`, restorable for 30 days). No Drive tool permanently deletes or shares. Two more tools
+write into a Google Sheet that already exists: `sheet_append_rows` adds rows under the last one with content and never
+overwrites a cell; `sheet_update_cells` overwrites at most 50 cells per call, only when the caller's `expectedValues` equal
+what the cells show now and `confirm: true` is passed (plus `confirmFormulas: true` to replace a formula), and otherwise
+returns a preview or a refusal. Neither adds, deletes or renames a tab, changes formatting, or shares. Two read
 content. `drive_export_file` returns only the rendered text of a Google Sheet or Google Doc and refuses every
 other mime type before any content request. Its result is capped at 200 KB; a larger export is written into
 the account's download directory under a fresh name. `drive_download_file` takes the other files — a PDF, a .docx, an image — and
