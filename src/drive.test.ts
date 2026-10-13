@@ -2602,3 +2602,194 @@ test("drive_create_spreadsheet passes RAW through and names the created id when 
     teardownAccountFixture();
   }
 });
+
+// --- end-to-end: sheet_append_rows ---
+//
+// The fixture tab "Arkusz1" holds two rows, so the first free row is 3.
+
+const APPEND_PATH = "/v4/spreadsheets/sheet1/values/'Arkusz1':append";
+const APPEND_ROWS = [["Nowak", "Jan", "=B3&A3"]];
+
+function appendRoutes(options: { file?: unknown; updatedRange?: string } = {}): FakeRoute[] {
+  return [
+    ...sheetRoutes(options.file ?? SHEET_FILE),
+    {
+      method: "POST",
+      host: SHEETS_HOST,
+      test: (p) => decodeURIComponent(p) === APPEND_PATH,
+      respond: () => ({
+        updates: { updatedRange: options.updatedRange ?? "Arkusz1!A3:C3", updatedRows: 1, updatedColumns: 3, updatedCells: 3 },
+      }),
+    },
+  ];
+}
+
+function appendCall(calls: FakeCall[]): FakeCall | undefined {
+  return calls.find((call) => call.method === "POST" && decodeURIComponent(call.pathname) === APPEND_PATH);
+}
+
+test("sheet_append_rows with a token lacking the Drive scope refuses before any network call", async () => {
+  setupAccountFixture(false);
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(appendRoutes());
+
+    const result = await callTool(handlers, "sheet_append_rows", { account: ACCOUNT, fileId: "sheet1", sheet: "Arkusz1", rows: APPEND_ROWS });
+
+    assert.match(result.error as string, /authorized before Octomail requested Drive access/);
+    assert.equal(calls.length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_append_rows refuses empty, ragged-to-nothing and oversized input before any network call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(appendRoutes());
+    const call = (rows: string[][]) => callTool(handlers, "sheet_append_rows", { account: ACCOUNT, fileId: "sheet1", sheet: "Arkusz1", rows });
+
+    assert.match((await call([])).error as string, /rows is empty/);
+    assert.match((await call([["a"], []])).error as string, /Row 2 of rows has no cells/);
+    assert.match((await call(Array.from({ length: 1001 }, () => ["a"]))).error as string, /1001 rows; the cap is 1000/);
+    assert.match(
+      (await call(Array.from({ length: 201 }, () => Array.from({ length: 100 }, () => "c")))).error as string,
+      /20100 cells; the cap is 20000/,
+    );
+    assert.equal(calls.length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_append_rows refuses a PDF and a trashed Sheet without a Sheets call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const pdf = installFakeNetwork([{ method: "GET", test: (p) => p === "/drive/v3/files/pdf1", respond: () => PDF_FILE }]);
+    const refused = await callTool(handlers, "sheet_append_rows", { account: ACCOUNT, fileId: "pdf1", sheet: "Arkusz1", rows: APPEND_ROWS });
+    assert.match(refused.error as string, /application\/pdf, not a Google Sheet/);
+    assert.match(refused.error as string, /Nothing was changed\.$/);
+    assert.equal(sheetsCalls(pdf.calls).length, 0);
+
+    const trashed = installFakeNetwork(appendRoutes({ file: SHEET_TRASHED }));
+    const inTrash = await callTool(handlers, "sheet_append_rows", { account: ACCOUNT, fileId: "sheet1", sheet: "Arkusz1", rows: APPEND_ROWS });
+    assert.match(inTrash.error as string, /is in the trash/);
+    assert.equal(sheetsCalls(trashed.calls).length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_append_rows refuses an unknown tab, listing the tabs, and writes nothing", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(appendRoutes());
+
+    const result = await callTool(handlers, "sheet_append_rows", { account: ACCOUNT, fileId: "sheet1", sheet: "Brak", rows: APPEND_ROWS });
+
+    assert.match(result.error as string, /Sheet "Brak" not found/);
+    assert.match(result.error as string, /"Arkusz1", "stare wpisy"/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_append_rows appends under the last row with INSERT_ROWS and reports the range", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(appendRoutes());
+
+    const result = await callTool(handlers, "sheet_append_rows", {
+      account: ACCOUNT,
+      fileId: "sheet1",
+      sheet: "Arkusz1",
+      rows: APPEND_ROWS,
+      expectedStartRow: 3,
+    });
+
+    assert.equal(result.error, undefined);
+    assert.equal(result.updatedRange, "Arkusz1!A3:C3");
+    assert.equal(result.startRow, 3);
+    assert.equal(result.rows, 1);
+    assert.equal(result.cells, 3);
+    assert.equal(result.sheet.title, "Arkusz1");
+    assert.equal(result.valueInput, "USER_ENTERED");
+    assert.equal(result.notice, undefined);
+    assert.ok(!("text" in result) && !("values" in result));
+
+    const post = appendCall(calls);
+    assert.ok(post);
+    assert.equal(post.url.searchParams.get("insertDataOption"), "INSERT_ROWS");
+    assert.equal(post.url.searchParams.get("valueInputOption"), "USER_ENTERED");
+    assert.deepEqual(JSON.parse(post.body as string).values, APPEND_ROWS);
+    assert.equal(calls.filter((call) => call.method !== "GET").length, 1);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_append_rows passes valueInput RAW through", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(appendRoutes());
+
+    const result = await callTool(handlers, "sheet_append_rows", { account: ACCOUNT, fileId: "sheet1", sheet: "Arkusz1", rows: APPEND_ROWS, valueInput: "RAW" });
+
+    assert.equal(result.valueInput, "RAW");
+    assert.equal(appendCall(calls)?.url.searchParams.get("valueInputOption"), "RAW");
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_append_rows refuses when expectedStartRow is not the first free row", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork(appendRoutes());
+
+    const result = await callTool(handlers, "sheet_append_rows", {
+      account: ACCOUNT,
+      fileId: "sheet1",
+      sheet: "Arkusz1",
+      rows: APPEND_ROWS,
+      expectedStartRow: 37,
+    });
+
+    assert.match(result.error as string, /first free row on tab "Arkusz1" is 3, not 37/);
+    assert.match(result.error as string, /Nothing was changed\.$/);
+    assertNoWrite(calls);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("sheet_append_rows adds a notice when Sheets put the rows somewhere else", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    installFakeNetwork(appendRoutes({ updatedRange: "'Arkusz1'!B9:D9" }));
+
+    const result = await callTool(handlers, "sheet_append_rows", { account: ACCOUNT, fileId: "sheet1", sheet: "Arkusz1", rows: APPEND_ROWS });
+
+    assert.equal(result.updatedRange, "'Arkusz1'!B9:D9");
+    assert.match(result.notice as string, /expected to start at A3/);
+    assert.match(result.notice as string, /B9/);
+  } finally {
+    teardownAccountFixture();
+  }
+});
