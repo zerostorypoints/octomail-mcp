@@ -946,8 +946,9 @@ async function moveFiles(
 // with the Sheet mime type, so it lands on a shared drive with the right
 // owner), then filled in place through the Sheets API. The tool exists so a
 // session can hand the user a ready-made sheet (a payroll list, a plan) without
-// a binary upload and without ever editing a sheet that already exists:
-// it refuses a same-named file in the folder and never touches another id.
+// a binary upload. It refuses a same-named file in the folder and never
+// touches another id; writing into a sheet that already exists is the job of
+// sheet_append_rows and sheet_update_cells, below.
 
 export const SPREADSHEET_MAX_SHEETS = 20;
 export const SPREADSHEET_MAX_CELLS = 20000;
@@ -1203,6 +1204,358 @@ export async function exportFile(deps: ExportDeps, input: { fileId: string; shee
   return result;
 }
 
+// --- sheet_append_rows / sheet_update_cells: shared checks ---
+//
+// The two tools that write into a spreadsheet that already exists. Appending
+// is an ordinary operation; overwriting is gated the way drive_trash_file is.
+// Neither adds, removes or renames a tab, changes formatting, or shares.
+
+async function getSheetFileForEdit(drive: drive_v3.Drive, fileId: string, tool: string, outcome: string): Promise<FileProjection> {
+  const file = await getFile(drive, fileId, outcome);
+  if (file.mimeType !== SHEET_MIME) {
+    throw new Error(
+      `File ${file.id} is ${file.mimeType}, not a Google Sheet. ${tool} edits only native Google Sheets and never an uploaded .xlsx, a PDF or a Google Doc. ${outcome}`,
+    );
+  }
+  return file;
+}
+
+async function sheetsSetupAware<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (isServiceDisabledError(error)) {
+      throw new Error(describeSheetsApiDisabled());
+    }
+    throw error;
+  }
+}
+
+function columnLetters(column: number): string {
+  let letters = "";
+  for (let n = column; n > 0; n = Math.floor((n - 1) / 26)) {
+    letters = String.fromCharCode(65 + ((n - 1) % 26)) + letters;
+  }
+  return letters;
+}
+
+function columnNumber(letters: string): number {
+  return [...letters].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0);
+}
+
+// --- sheet_append_rows ---
+
+export const APPEND_MAX_ROWS = 1000;
+
+export function assertAppendInput(rows: string[][], outcome: string): number {
+  if (rows.length === 0) {
+    throw new Error(`rows is empty; there is nothing to append. ${outcome}`);
+  }
+  if (rows.length > APPEND_MAX_ROWS) {
+    throw new Error(`rows has ${rows.length} rows; the cap is ${APPEND_MAX_ROWS} per call. Split the data. ${outcome}`);
+  }
+  let cells = 0;
+  rows.forEach((row, i) => {
+    if (row.length === 0) {
+      throw new Error(`Row ${i + 1} of rows has no cells. ${outcome}`);
+    }
+    for (const cell of row) {
+      if (cell.length > SPREADSHEET_MAX_CELL_CHARS) {
+        throw new Error(`A cell in row ${i + 1} is ${cell.length} characters; the cap is ${SPREADSHEET_MAX_CELL_CHARS}. ${outcome}`);
+      }
+    }
+    cells += row.length;
+  });
+  if (cells > SPREADSHEET_MAX_CELLS) {
+    throw new Error(`rows carries ${cells} cells; the cap is ${SPREADSHEET_MAX_CELLS} per call. Split the data. ${outcome}`);
+  }
+  return cells;
+}
+
+export type AppendRowsResult = {
+  file: FileProjection;
+  sheet: SheetTab;
+  updatedRange: string;
+  startRow: number;
+  rows: number;
+  cells: number;
+  valueInput: "USER_ENTERED" | "RAW";
+  note: string;
+  notice?: string;
+};
+
+// The tab is read first (as FORMULA, so a formula that renders empty still
+// counts as content) to find the first free row: expectedStartRow is checked
+// against it before anything is written, because formulas in the new row
+// carry that row number. values.append then picks the spot itself, by its
+// own "table" detection; where the two disagree the rows are already in the
+// sheet, so the difference is reported in notice rather than refused.
+export async function appendSheetRows(
+  drive: drive_v3.Drive,
+  sheets: sheets_v4.Sheets,
+  input: { fileId: string; sheet: string; rows: string[][]; valueInput: "USER_ENTERED" | "RAW"; expectedStartRow?: number },
+): Promise<AppendRowsResult> {
+  const outcome = "Nothing was changed.";
+  const cells = assertAppendInput(input.rows, outcome);
+  const file = await getSheetFileForEdit(drive, input.fileId, "sheet_append_rows", outcome);
+
+  return await sheetsSetupAware(async () => {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId: file.id, fields: SHEET_TABS_FIELDS });
+    const tab = pickSheet(sheetTabsFromProperties(meta.data.sheets), file.name, input.sheet);
+    const range = a1SheetRange(tab.title);
+    const current = await sheets.spreadsheets.values.get({
+      spreadsheetId: file.id,
+      range,
+      valueRenderOption: "FORMULA",
+      majorDimension: "ROWS",
+    });
+    const startRow = (current.data.values ?? []).length + 1;
+    if (input.expectedStartRow !== undefined && input.expectedStartRow !== startRow) {
+      throw new Error(
+        `The first free row on tab "${tab.title}" is ${startRow}, not ${input.expectedStartRow}. Row numbers in the formulas being appended would point at the wrong row. ${outcome}`,
+      );
+    }
+
+    const appended = await sheets.spreadsheets.values.append({
+      spreadsheetId: file.id,
+      range,
+      valueInputOption: input.valueInput,
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { majorDimension: "ROWS", values: input.rows },
+    });
+    const updatedRange = appended.data.updates?.updatedRange ?? "";
+    const result: AppendRowsResult = {
+      file,
+      sheet: tab,
+      updatedRange,
+      startRow,
+      rows: input.rows.length,
+      cells,
+      valueInput: input.valueInput,
+      note: `Appended ${input.rows.length} row(s), ${cells} cells, to tab "${tab.title}" of ${file.name} at ${updatedRange}. No existing cell was overwritten.`,
+    };
+    const start = /(?:^|!)\$?([A-Z]+)\$?(\d+)(?::[^!]*)?$/.exec(updatedRange);
+    if (!start || start[1] !== "A" || Number(start[2]) !== startRow) {
+      result.startRow = start ? Number(start[2]) : startRow;
+      result.notice = `The rows were expected to start at A${startRow} (the row under the last one with content) but Sheets wrote them to ${updatedRange || "an unreported range"}. They are in the sheet; check that range, and any row numbers in appended formulas, with drive_export_file.`;
+    }
+    return result;
+  });
+}
+
+// --- sheet_update_cells ---
+//
+// The only tool that overwrites cells. Guards, in the order they are
+// checked: a small bounded range; values and expectedValues of exactly that
+// shape; a range inside the tab's existing data; expectedValues equal to what
+// the cells show now (the formatted text drive_export_file returns); confirm;
+// and confirmFormulas when a formula would be replaced. The Sheets API has no
+// If-Match, so a change made by someone else between the read and the write
+// is not detected.
+
+export const UPDATE_MAX_CELLS = 50;
+
+export type A1Range = { startRow: number; startColumn: number; endRow: number; endColumn: number; rows: number; columns: number };
+
+export function parseA1Range(range: string, outcome: string): A1Range {
+  if (range.includes("!")) {
+    throw new Error(`range "${range}" must be A1 notation without a tab name; the tab goes in sheet. ${outcome}`);
+  }
+  const match = /^([A-Z]{1,3})([1-9]\d*)(?::([A-Z]{1,3})([1-9]\d*))?$/.exec(range);
+  if (!match) {
+    throw new Error(`range "${range}" is not a bounded A1 range such as B7 or B7:D9 (capital letters, no $, no open-ended A:A). ${outcome}`);
+  }
+  const startColumn = columnNumber(match[1]);
+  const startRow = Number(match[2]);
+  const endColumn = match[3] === undefined ? startColumn : columnNumber(match[3]);
+  const endRow = match[4] === undefined ? startRow : Number(match[4]);
+  if (endRow < startRow || endColumn < startColumn) {
+    throw new Error(`range "${range}" ends before it starts. ${outcome}`);
+  }
+  return { startRow, startColumn, endRow, endColumn, rows: endRow - startRow + 1, columns: endColumn - startColumn + 1 };
+}
+
+function assertGridShape(name: string, grid: string[][], range: string, box: A1Range, outcome: string): void {
+  if (grid.length !== box.rows || grid.some((row) => row.length !== box.columns)) {
+    throw new Error(
+      `${name} must be ${box.rows} row(s) x ${box.columns} column(s) to match ${range}, with "" for an empty cell. ${outcome}`,
+    );
+  }
+}
+
+export function assertUpdateInput(
+  input: { range: string; values: string[][]; expectedValues: string[][] },
+  outcome: string,
+): A1Range {
+  const box = parseA1Range(input.range, outcome);
+  const cells = box.rows * box.columns;
+  if (cells > UPDATE_MAX_CELLS) {
+    throw new Error(`range ${input.range} covers ${cells} cells; the cap is ${UPDATE_MAX_CELLS} per call. ${outcome}`);
+  }
+  assertGridShape("values", input.values, input.range, box, outcome);
+  assertGridShape("expectedValues", input.expectedValues, input.range, box, outcome);
+  for (const cell of input.values.flat()) {
+    if (cell.length > SPREADSHEET_MAX_CELL_CHARS) {
+      throw new Error(`A cell in values is ${cell.length} characters; the cap is ${SPREADSHEET_MAX_CELL_CHARS}. ${outcome}`);
+    }
+  }
+  return box;
+}
+
+// The Sheets API drops trailing empty cells and rows; this cuts the box out
+// of what it returned and puts the empty strings back. offsetRow and
+// offsetColumn are where `values` starts on the tab (1-based).
+function gridSlice(values: unknown[][] | null | undefined, box: A1Range, offsetRow: number, offsetColumn: number): unknown[][] {
+  return Array.from({ length: box.rows }, (_, r) =>
+    Array.from({ length: box.columns }, (_, c) => values?.[box.startRow - offsetRow + r]?.[box.startColumn - offsetColumn + c] ?? ""),
+  );
+}
+
+export type UpdateCellsMismatch = { cell: string; expected: string; actual: string };
+
+export type UpdateCellsResult = {
+  file: FileProjection;
+  sheet: SheetTab;
+  range: string;
+  preview?: true;
+  updatedCells?: number;
+  changedCells?: number;
+  before: string[][];
+  after: string[][];
+  expectedMatches?: boolean;
+  mismatches?: UpdateCellsMismatch[];
+  formulasBefore: { cell: string; formula: string }[];
+  needsConfirmFormulas?: boolean;
+  valueInput: "USER_ENTERED" | "RAW";
+  note: string;
+};
+
+export async function updateSheetCells(
+  drive: drive_v3.Drive,
+  sheets: sheets_v4.Sheets,
+  input: {
+    fileId: string;
+    sheet: string;
+    range: string;
+    values: string[][];
+    expectedValues: string[][];
+    valueInput: "USER_ENTERED" | "RAW";
+    confirm?: boolean;
+    confirmFormulas?: boolean;
+  },
+): Promise<UpdateCellsResult> {
+  const outcome = "Nothing was changed.";
+  const box = assertUpdateInput(input, outcome);
+  const file = await getSheetFileForEdit(drive, input.fileId, "sheet_update_cells", outcome);
+
+  return await sheetsSetupAware(async () => {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId: file.id, fields: SHEET_TABS_FIELDS });
+    const tab = pickSheet(sheetTabsFromProperties(meta.data.sheets), file.name, input.sheet);
+    const tabRange = a1SheetRange(tab.title);
+    const cellRange = `${tabRange}!${input.range}`;
+
+    // Same render options as drive_export_file, so expectedValues can be
+    // copied from an export.
+    const shown = await sheets.spreadsheets.values.get({
+      spreadsheetId: file.id,
+      range: tabRange,
+      valueRenderOption: "FORMATTED_VALUE",
+      dateTimeRenderOption: "FORMATTED_STRING",
+      majorDimension: "ROWS",
+    });
+    const data = shown.data.values ?? [];
+    const dataColumns = data.reduce((max, row) => Math.max(max, row.length), 0);
+    if (box.endRow > data.length || box.endColumn > dataColumns) {
+      const extent = data.length === 0 ? "the tab is empty" : `A1:${columnLetters(dataColumns)}${data.length}`;
+      throw new Error(
+        `range ${input.range} reaches past the data on tab "${tab.title}" (${extent}). sheet_update_cells only changes cells inside existing data; use sheet_append_rows to add rows. ${outcome}`,
+      );
+    }
+    const before = gridSlice(data, box, 1, 1).map((row) => row.map(String));
+
+    const raw = await sheets.spreadsheets.values.get({
+      spreadsheetId: file.id,
+      range: cellRange,
+      valueRenderOption: "FORMULA",
+      majorDimension: "ROWS",
+    });
+    const formulas = gridSlice(raw.data.values, box, box.startRow, box.startColumn);
+
+    const mismatches: UpdateCellsMismatch[] = [];
+    const formulasBefore: { cell: string; formula: string }[] = [];
+    const formulasReplaced: string[] = [];
+    for (let r = 0; r < box.rows; r += 1) {
+      for (let c = 0; c < box.columns; c += 1) {
+        const cell = `${columnLetters(box.startColumn + c)}${box.startRow + r}`;
+        if (input.expectedValues[r][c] !== before[r][c]) {
+          mismatches.push({ cell, expected: input.expectedValues[r][c], actual: before[r][c] });
+        }
+        const formula = formulas[r][c];
+        if (typeof formula === "string" && formula.startsWith("=")) {
+          formulasBefore.push({ cell, formula });
+          if (input.values[r][c] !== formula) {
+            formulasReplaced.push(`${cell} (${formula})`);
+          }
+        }
+      }
+    }
+    const where = `${input.range} on tab "${tab.title}" of ${file.name}`;
+
+    if (!input.confirm) {
+      return {
+        file,
+        sheet: tab,
+        range: input.range,
+        preview: true,
+        before,
+        after: input.values,
+        expectedMatches: mismatches.length === 0,
+        mismatches,
+        formulasBefore,
+        needsConfirmFormulas: formulasReplaced.length > 0,
+        valueInput: input.valueInput,
+        note:
+          mismatches.length > 0
+            ? `Preview of ${where}. expectedValues does not match the sheet in ${mismatches.length} cell(s), so the write would be refused. ${outcome}`
+            : `Preview of ${where}. ${outcome} Repeat the call with confirm: true${formulasReplaced.length > 0 ? " and confirmFormulas: true" : ""} to write.`,
+      };
+    }
+    if (mismatches.length > 0) {
+      const list = mismatches.map((m) => `${m.cell}: expected ${JSON.stringify(m.expected)}, found ${JSON.stringify(m.actual)}`).join("; ");
+      throw new Error(`expectedValues does not match ${where}. ${list}. Read the tab again with drive_export_file. ${outcome}`);
+    }
+    if (formulasReplaced.length > 0 && !input.confirmFormulas) {
+      throw new Error(
+        `The write would replace ${formulasReplaced.length} formula(s) in ${where}: ${formulasReplaced.join(", ")}. Repeat the call with confirmFormulas: true if that is intended. ${outcome}`,
+      );
+    }
+
+    const written = await sheets.spreadsheets.values.update({
+      spreadsheetId: file.id,
+      range: cellRange,
+      valueInputOption: input.valueInput,
+      includeValuesInResponse: true,
+      responseValueRenderOption: "FORMATTED_VALUE",
+      responseDateTimeRenderOption: "FORMATTED_STRING",
+      requestBody: { majorDimension: "ROWS", values: input.values },
+    });
+    const after = gridSlice(written.data.updatedData?.values, box, box.startRow, box.startColumn).map((row) => row.map(String));
+    const changedCells = after.flat().filter((cell, i) => cell !== before.flat()[i]).length;
+    return {
+      file,
+      sheet: tab,
+      range: input.range,
+      updatedCells: written.data.updatedCells ?? box.rows * box.columns,
+      changedCells,
+      before,
+      after,
+      formulasBefore,
+      valueInput: input.valueInput,
+      note: `Wrote ${where}; ${changedCells} cell(s) now show a different value. No other cell, tab or formatting was changed.`,
+    };
+  });
+}
+
 export function registerDriveTools(server: McpServer): void {
   server.tool(
     "drive_list_files",
@@ -1451,6 +1804,69 @@ export function registerDriveTools(server: McpServer): void {
         return await driveScopeAware(account, "Nothing was changed.", async () => {
           const drive = await driveForAccount(account);
           return await exportFile({ drive, sheets: () => sheetsForAccount(account), account }, { fileId, sheet });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "sheet_append_rows",
+    "Append rows under the last row with content on one tab of an existing Google Sheet (My Drive or a shared drive), through spreadsheets.values.append with INSERT_ROWS. Never overwrites a cell: new rows are inserted, and the only tool that changes existing cells is sheet_update_cells. sheet is the exact tab title; an unknown title is refused with the list of tabs. Up to 1000 rows and 20 000 cells per call. Values are written as USER_ENTERED by default, so a cell starting with = becomes a formula; pass valueInput: \"RAW\" to store every cell as literal text. Formulas that name their own row need the row number: pass expectedStartRow and the call is refused, with nothing written, when the first free row is a different one. Native Google Sheets only: an uploaded .xlsx, a PDF or a Doc is refused. Does not create, delete or rename tabs, does not change formatting, does not share the file, and returns the range written, never the sheet's content.",
+    {
+      ...accountShape,
+      fileId: z.string().min(1).describe("Drive file id of a Google Sheet."),
+      sheet: z.string().min(1).describe("Tab title to append to (exact match)."),
+      rows: z.array(z.array(z.string())).describe("Rows of cells, as strings, written from column A."),
+      valueInput: z.enum(["USER_ENTERED", "RAW"]).optional().describe("How cell text is interpreted. Default USER_ENTERED."),
+      expectedStartRow: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Row number the first appended row must land on (last row with content + 1). A different first free row is refused."),
+    },
+    async ({ account, fileId, sheet, rows, valueInput, expectedStartRow }) =>
+      safeTool(async () => {
+        assertAppendInput(rows, "Nothing was changed.");
+        return await driveScopeAware(account, "Nothing was changed.", async () => {
+          const drive = await driveForAccount(account);
+          const sheetsClient = await sheetsForAccount(account);
+          return await appendSheetRows(drive, sheetsClient, { fileId, sheet, rows, valueInput: valueInput ?? "USER_ENTERED", expectedStartRow });
+        });
+      }, account),
+  );
+
+  server.tool(
+    "sheet_update_cells",
+    "Overwrite a small range of cells on one tab of an existing Google Sheet (My Drive or a shared drive); the only tool in this server that changes existing cells. Guards: without confirm: true it changes nothing and returns a preview, the current values of the range next to the new ones; expectedValues is required and must equal what the cells show now, as drive_export_file returns them, otherwise the call is refused with the cells that differ; a cell holding a formula additionally needs confirmFormulas: true; range is bounded A1 notation without a tab name (B7 or B7:D9), at most 50 cells, and values and expectedValues must have exactly its shape, with \"\" for an empty cell (\"\" in values clears the cell). A range reaching past the tab's existing data is refused: adding rows is sheet_append_rows. Values are written as USER_ENTERED by default; pass valueInput: \"RAW\" for literal text. Native Google Sheets only: an uploaded .xlsx, a PDF or a Doc is refused. Does not create, delete or rename tabs, does not change formatting, does not share the file. The Sheets API offers no conditional write, so an edit made by someone else between this tool's read and its write is not detected.",
+    {
+      ...accountShape,
+      fileId: z.string().min(1).describe("Drive file id of a Google Sheet."),
+      sheet: z.string().min(1).describe("Tab title (exact match)."),
+      range: z.string().min(1).describe("Bounded A1 range without a tab name, e.g. B7 or B7:D9; at most 50 cells."),
+      values: z.array(z.array(z.string())).describe("New cell text, exactly the shape of range; \"\" clears a cell."),
+      expectedValues: z
+        .array(z.array(z.string()))
+        .describe("What the cells show now (formatted text, as in drive_export_file), exactly the shape of range; \"\" for an empty cell."),
+      confirm: z.boolean().optional().describe("Must be true to write. Omitted or false: returns the preview and changes nothing."),
+      confirmFormulas: z.boolean().optional().describe("Required in addition to confirm when the write replaces a formula."),
+      valueInput: z.enum(["USER_ENTERED", "RAW"]).optional().describe("How cell text is interpreted. Default USER_ENTERED."),
+    },
+    async ({ account, fileId, sheet, range, values, expectedValues, confirm, confirmFormulas, valueInput }) =>
+      safeTool(async () => {
+        assertUpdateInput({ range, values, expectedValues }, "Nothing was changed.");
+        return await driveScopeAware(account, "Nothing was changed.", async () => {
+          const drive = await driveForAccount(account);
+          const sheetsClient = await sheetsForAccount(account);
+          return await updateSheetCells(drive, sheetsClient, {
+            fileId,
+            sheet,
+            range,
+            values,
+            expectedValues,
+            valueInput: valueInput ?? "USER_ENTERED",
+            confirm,
+            confirmFormulas,
+          });
         });
       }, account),
   );
