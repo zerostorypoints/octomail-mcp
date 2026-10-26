@@ -11,6 +11,7 @@ import {
   DOC_MIME,
   FOLDER_MIME,
   SHEET_MIME,
+  SLIDES_MIME,
   a1SheetRange,
   assertDriveName,
   assertListInput,
@@ -315,6 +316,14 @@ test("exportKindForMime maps a Google Sheet to sheet", () => {
 
 test("exportKindForMime maps a Google Doc to doc", () => {
   assert.equal(exportKindForMime(DOC_MIME), "doc");
+});
+
+test("exportKindForMime maps a Google Slides presentation to slides", () => {
+  assert.equal(exportKindForMime(SLIDES_MIME), "slides");
+});
+
+test("exportFilename names a Slides export .txt", () => {
+  assert.equal(exportFilename("Pitch", "slides"), "Pitch.txt");
 });
 
 test("exportKindForMime returns undefined for a folder, a PDF and an uploaded xlsx", () => {
@@ -1390,7 +1399,7 @@ test("drive_export_file refuses a PDF before any content request", async () => {
 
     const result = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "pdf1" });
 
-    assert.match(result.error as string, /application\/pdf, not a Google Sheet or Google Doc/);
+    assert.match(result.error as string, /application\/pdf, not a Google Sheet, Doc or Slides presentation/);
     assert.match(result.error as string, /drive_download_file/);
     assert.match(result.error as string, /Nothing was changed\.$/);
     assert.equal(sheetsCalls(calls).length, 0);
@@ -1554,6 +1563,50 @@ test("drive_export_file reads a Google Doc as plain text through files.export", 
     assert.equal(result.sizeBytes, Buffer.byteLength(DOC_TEXT));
     assert.equal(result.truncated, false);
     assert.equal(sheetsCalls(calls).length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+const SLIDES_FILE = { id: "deck1", name: "Pitch", mimeType: SLIDES_MIME };
+const SLIDES_TEXT = "Slide one title\nSlide two: 257 visitors\n";
+
+test("drive_export_file reads a Google Slides presentation as plain text through files.export", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === "/drive/v3/files/deck1", respond: () => SLIDES_FILE },
+      { method: "GET", test: (p) => p === "/drive/v3/files/deck1/export", respond: () => fakeReply(200, SLIDES_TEXT) },
+    ]);
+
+    const result = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "deck1" });
+
+    assert.equal(result.error, undefined, `expected no error, got: ${JSON.stringify(result)}`);
+    assert.equal(calls[1].url.searchParams.get("mimeType"), "text/plain");
+    assert.equal(result.text, SLIDES_TEXT);
+    assert.equal(result.kind, "slides");
+    assert.equal(result.format, "text");
+    assert.equal(sheetsCalls(calls).length, 0);
+  } finally {
+    teardownAccountFixture();
+  }
+});
+
+test("drive_export_file refuses sheet on a Google Slides presentation without an export call", async () => {
+  setupAccountFixture();
+  try {
+    const { server, handlers } = createFakeServer();
+    registerDriveTools(server);
+    const { calls } = installFakeNetwork([
+      { method: "GET", test: (p) => p === "/drive/v3/files/deck1", respond: () => SLIDES_FILE },
+    ]);
+
+    const result = await callTool(handlers, "drive_export_file", { account: ACCOUNT, fileId: "deck1", sheet: "x" });
+
+    assert.match(result.error as string, /sheet applies only to a Google Sheet/);
+    assert.ok(calls.every((call) => !call.pathname.endsWith("/export")));
   } finally {
     teardownAccountFixture();
   }

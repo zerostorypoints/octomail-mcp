@@ -174,22 +174,26 @@ export function copyProvenanceDescription(input: {
 
 export const SHEET_MIME = "application/vnd.google-apps.spreadsheet";
 export const DOC_MIME = "application/vnd.google-apps.document";
+export const SLIDES_MIME = "application/vnd.google-apps.presentation";
 
 // The text of an export lands in model context, like base64 does for
 // gmail_get_attachment; 200 KB is the most a single tool result should carry.
 export const MAX_EXPORT_TEXT_BYTES = 200 * 1024;
 
-export type ExportKind = "sheet" | "doc";
+export type ExportKind = "sheet" | "doc" | "slides";
 
-// Only the two Google-native document types are ever exported. Anything else
-// — a PDF, an image, an uploaded .xlsx — has bytes of its own, and this tool
-// never downloads bytes.
+// Only these three Google-native document types are ever exported. Anything
+// else — a PDF, an image, an uploaded .xlsx — has bytes of its own, and this
+// tool never downloads bytes.
 export function exportKindForMime(mimeType: string): ExportKind | undefined {
   if (mimeType === SHEET_MIME) {
     return "sheet";
   }
   if (mimeType === DOC_MIME) {
     return "doc";
+  }
+  if (mimeType === SLIDES_MIME) {
+    return "slides";
   }
   return undefined;
 }
@@ -301,7 +305,7 @@ export function capExportText(
 }
 
 export function exportFilename(fileName: string, kind: ExportKind, sheetTitle?: string): string {
-  const candidate = kind === "doc" ? `${fileName}.txt` : `${fileName} - ${sheetTitle ?? ""}.csv`;
+  const candidate = kind === "sheet" ? `${fileName} - ${sheetTitle ?? ""}.csv` : `${fileName}.txt`;
   return sanitizeAttachmentFilename(candidate, "export");
 }
 
@@ -1106,7 +1110,8 @@ export async function readSheetAsCsv(
 
 // files.export takes no supportsAllDrives parameter; the files.get before it
 // is what proves the id resolves through a shared drive. Google caps this
-// export at 10 MB and answers a larger Doc with its own error.
+// export at 10 MB and answers a larger Doc with its own error. Slides export
+// to text/plain the same way: the text of every slide, speaker notes excluded.
 export async function readDocAsText(drive: drive_v3.Drive, fileId: string): Promise<string> {
   const response = await drive.files.export({ fileId, mimeType: "text/plain" }, { responseType: "text" });
   return String(response.data);
@@ -1163,11 +1168,12 @@ export async function exportFile(deps: ExportDeps, input: { fileId: string; shee
   const kind = exportKindForMime(file.mimeType);
   if (kind === undefined) {
     throw new Error(
-      `File ${file.id} is ${file.mimeType}, not a Google Sheet or Google Doc. drive_export_file reads only Google-native documents and never downloads a binary file; use drive_download_file to save this one to the download directory. ${outcome}`,
+      `File ${file.id} is ${file.mimeType}, not a Google Sheet, Doc or Slides presentation. drive_export_file reads only Google-native documents and never downloads a binary file; use drive_download_file to save this one to the download directory. ${outcome}`,
     );
   }
-  if (kind === "doc" && input.sheet !== undefined) {
-    throw new Error(`sheet applies only to a Google Sheet; ${file.id} is a Google Doc. ${outcome}`);
+  if (kind !== "sheet" && input.sheet !== undefined) {
+    const what = kind === "doc" ? "a Google Doc" : "a Google Slides presentation";
+    throw new Error(`sheet applies only to a Google Sheet; ${file.id} is ${what}. ${outcome}`);
   }
 
   let fullText: string;
@@ -1789,10 +1795,10 @@ export function registerDriveTools(server: McpServer): void {
 
   server.tool(
     "drive_export_file",
-    "Read the content of a Google-native document on Drive: a Google Sheet as CSV (one tab, default the first; pass sheet to pick another by title) or a Google Doc as plain text. Read-only and never a binary file: a PDF, image, or uploaded .xlsx is refused. The text in the result is capped at 200 KB; a larger export is truncated on a line boundary, and the full text is written into the account's download directory (OCTOMAIL_DOWNLOAD_DIR/<account>) with its path returned as savedTo.",
+    "Read the content of a Google-native document on Drive: a Google Sheet as CSV (one tab, default the first; pass sheet to pick another by title) or a Google Doc or Google Slides presentation as plain text (Slides: the text on each slide, without speaker notes). Read-only and never a binary file: a PDF, image, or uploaded .xlsx is refused. The text in the result is capped at 200 KB; a larger export is truncated on a line boundary, and the full text is written into the account's download directory (OCTOMAIL_DOWNLOAD_DIR/<account>) with its path returned as savedTo.",
     {
       ...accountShape,
-      fileId: z.string().min(1).describe("Drive file id of a Google Sheet or Google Doc."),
+      fileId: z.string().min(1).describe("Drive file id of a Google Sheet, Google Doc or Google Slides presentation."),
       sheet: z
         .string()
         .min(1)
